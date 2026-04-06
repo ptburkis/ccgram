@@ -714,6 +714,12 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         ):
             continue
 
+        # Drop heartbeat acknowledgements: when an agent receives a periodic
+        # heartbeat poll and has nothing to report, it replies with the literal
+        # token HEARTBEAT_OK. These should never reach the user's chat.
+        if msg.content_type == "text" and (msg.text or "").strip() == "HEARTBEAT_OK":
+            continue
+
         # Handle interactive tools specially - capture terminal and send UI
         if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":
             # Mark interactive mode BEFORE sleeping so polling skips this window
