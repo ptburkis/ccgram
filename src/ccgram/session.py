@@ -736,7 +736,34 @@ class SessionManager:
         except (json.JSONDecodeError, OSError):  # fmt: skip
             return
 
-        prefix = f"{config.tmux_session_name}:"
+        # Canonicalize web-terminal grouped-mirror prefixes (web-<uuid>:@N)
+        # to the canonical session prefix. Claude Code's hook can resolve the
+        # pane → session non-deterministically across grouped tmux sessions,
+        # producing keys that differ in prefix but refer to the same window.
+        # Collapse them so downstream lookups converge on a single key.
+        canonical_session = config.tmux_session_name or "ccgram"
+        if canonical_session.startswith("web-"):
+            canonical_session = "ccgram"
+        rebuilt: dict[str, Any] = {}
+        rewrote = False
+        for k, v in session_map.items():
+            if isinstance(k, str) and k.startswith("web-") and ":" in k:
+                _, _, suffix = k.rpartition(":")
+                new_key = f"{canonical_session}:{suffix}"
+                if new_key not in rebuilt:
+                    rebuilt[new_key] = v
+                rewrote = True
+            else:
+                if k not in rebuilt:
+                    rebuilt[k] = v
+        if rewrote:
+            session_map = rebuilt
+            try:
+                atomic_write_json(config.session_map_file, session_map)
+            except OSError:
+                pass
+
+        prefix = f"{canonical_session}:"
         valid_wids: set[str] = set()
         # Track session_ids from old-format entries so we don't nuke
         # migrated window_states before the new hook has fired.
@@ -983,9 +1010,9 @@ class SessionManager:
     _NOTIFICATION_MODES = NOTIFICATION_MODES
 
     def get_notification_mode(self, window_id: str) -> str:
-        """Get notification mode for a window (default: 'all')."""
+        """Get notification mode for a window (default: 'summary')."""
         state = self.window_states.get(window_id)
-        return state.notification_mode if state else "all"
+        return state.notification_mode if state else "summary"
 
     def set_notification_mode(self, window_id: str, mode: str) -> None:
         """Set notification mode for a window."""
@@ -997,7 +1024,7 @@ class SessionManager:
             self._save_state()
 
     def cycle_notification_mode(self, window_id: str) -> str:
-        """Cycle notification mode: all → errors_only → muted → all. Returns new mode."""
+        """Cycle notification mode: summary ↔ all. Returns new mode."""
         current = self.get_notification_mode(window_id)
         modes = self._NOTIFICATION_MODES
         idx = modes.index(current) if current in modes else 0

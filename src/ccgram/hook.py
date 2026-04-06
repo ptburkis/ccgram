@@ -49,7 +49,7 @@ _PATH_HOOK_MARKER = "ccgram hook"
 _LEGACY_HOOK_MARKER = "ccbot hook"
 
 # Expected number of parts when parsing "session_name\t@id\twindow_name"
-_TMUX_FORMAT_PARTS = 3
+_TMUX_FORMAT_PARTS = 4
 
 # Hook event types ccgram handles (order matters for status display)
 _HOOK_EVENT_TYPES: tuple[str, ...] = (
@@ -341,7 +341,7 @@ def _resolve_window_id(pane_id: str) -> tuple[str, str, str] | None:
                 "-t",
                 pane_id,
                 "-p",
-                "#{session_name}\t#{window_id}\t#{window_name}",
+                "#{session_name}\t#{session_group}\t#{window_id}\t#{window_name}",
             ],
             capture_output=True,
             text=True,
@@ -351,18 +351,24 @@ def _resolve_window_id(pane_id: str) -> tuple[str, str, str] | None:
         logger.warning("tmux display-message timed out for pane %s", pane_id)
         return None
     raw_output = result.stdout.strip()
-    parts = raw_output.split("\t", 2)
+    parts = raw_output.split("\t", 3)
     if len(parts) < _TMUX_FORMAT_PARTS:
         logger.warning(
-            "Failed to parse session:window_id:window_name from tmux "
+            "Failed to parse session/group/window_id/window_name from tmux "
             "(pane=%s, output=%s)",
             pane_id,
             raw_output,
         )
         return None
 
-    tmux_session_name, window_id, window_name = parts
-    session_window_key = f"{tmux_session_name}:{window_id}"
+    tmux_session_name, session_group, window_id, window_name = parts
+    # When running inside a tmux session group (e.g. the canonical "ccgram"
+    # session plus web-terminal grouped mirrors), display-message resolves
+    # session_name non-deterministically based on the most-recently-attached
+    # session for the pane. Use the session group name as the canonical
+    # identifier when it's set, so all mirrors agree on a stable window_key.
+    canonical_session = session_group or tmux_session_name
+    session_window_key = f"{canonical_session}:{window_id}"
     return session_window_key, window_id, window_name
 
 

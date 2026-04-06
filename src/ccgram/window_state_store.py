@@ -25,7 +25,10 @@ YOLO_APPROVAL_MODE = "yolo"
 BATCH_MODES: frozenset[str] = frozenset({"batched", "verbose"})
 DEFAULT_BATCH_MODE = "batched"
 
-NOTIFICATION_MODES: tuple[str, ...] = ("all", "errors_only", "muted")
+NOTIFICATION_MODES: tuple[str, ...] = ("summary", "all")
+# Legacy mode names that have been collapsed into "summary" — used for migration
+# of existing window_states loaded from state.json.
+_LEGACY_NOTIFICATION_MODES: frozenset[str] = frozenset({"errors_only", "muted"})
 
 
 @dataclass
@@ -37,7 +40,7 @@ class WindowState:
         cwd: Working directory for direct file path construction
         window_name: Display name of the window
         transcript_path: Direct path to JSONL transcript file (from hook payload)
-        notification_mode: "all" | "errors_only" | "muted"
+        notification_mode: "summary" | "all"
         provider_name: Name of the agent provider for this window
         approval_mode: "normal" | "yolo"
         batch_mode: "batched" | "verbose"
@@ -48,7 +51,7 @@ class WindowState:
     cwd: str = ""
     window_name: str = ""
     transcript_path: str = ""
-    notification_mode: str = "all"
+    notification_mode: str = "summary"
     provider_name: str = ""
     approval_mode: str = DEFAULT_APPROVAL_MODE
     batch_mode: str = DEFAULT_BATCH_MODE
@@ -63,7 +66,7 @@ class WindowState:
             d["window_name"] = self.window_name
         if self.transcript_path:
             d["transcript_path"] = self.transcript_path
-        if self.notification_mode != "all":
+        if self.notification_mode != "summary":
             d["notification_mode"] = self.notification_mode
         if self.provider_name:
             d["provider_name"] = self.provider_name
@@ -77,12 +80,16 @@ class WindowState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
+        # Migrate legacy notification modes (errors_only, muted) → summary.
+        notif = data.get("notification_mode", "summary")
+        if notif in _LEGACY_NOTIFICATION_MODES:
+            notif = "summary"
         return cls(
             session_id=data.get("session_id", ""),
             cwd=data.get("cwd", ""),
             window_name=data.get("window_name", ""),
             transcript_path=data.get("transcript_path", ""),
-            notification_mode=data.get("notification_mode", "all"),
+            notification_mode=notif,
             provider_name=data.get("provider_name", ""),
             approval_mode=data.get("approval_mode", DEFAULT_APPROVAL_MODE),
             batch_mode=data.get("batch_mode", DEFAULT_BATCH_MODE),
@@ -144,7 +151,7 @@ class WindowStateStore:
         """Clear session association for a window (e.g., after /clear command)."""
         state = self.get_window_state(window_id)
         state.session_id = ""
-        state.notification_mode = "all"
+        state.notification_mode = "summary"
         self._schedule_save()
         logger.info("Cleared session for window_id %s", window_id)
 
@@ -200,9 +207,9 @@ class WindowStateStore:
     _NOTIFICATION_MODES = NOTIFICATION_MODES
 
     def get_notification_mode(self, window_id: str) -> str:
-        """Get notification mode for a window (default: 'all')."""
+        """Get notification mode for a window (default: 'summary')."""
         state = self.window_states.get(window_id)
-        return state.notification_mode if state else "all"
+        return state.notification_mode if state else "summary"
 
     def set_notification_mode(self, window_id: str, mode: str) -> None:
         """Set notification mode for a window."""
@@ -214,7 +221,7 @@ class WindowStateStore:
             self._schedule_save()
 
     def cycle_notification_mode(self, window_id: str) -> str:
-        """Cycle notification mode: all → errors_only → muted → all. Returns new mode."""
+        """Cycle notification mode: summary ↔ all. Returns new mode."""
         current = self.get_notification_mode(window_id)
         modes = self._NOTIFICATION_MODES
         idx = modes.index(current) if current in modes else 0

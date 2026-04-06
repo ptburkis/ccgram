@@ -75,12 +75,12 @@ CB_RESUME_CANCEL = "res:x"  # cancel resume browser
 
 # Notification mode UI metadata (canonical mode list lives in session.py)
 NOTIFY_MODE_ICONS: dict[str, str] = {
-    "all": "\U0001f514",
-    "errors_only": "\u26a0\ufe0f",
-    "muted": "\U0001f515",
+    "summary": "\U0001f514",  # 🔔 — prose only (default, "feels like chat")
+    "all": "\U0001f50a",  # 🔊 — full firehose (tool calls, status, everything)
 }
 NOTIFY_MODE_LABELS: dict[str, str] = {
-    k: f"{v} {k.replace('_', ' ').title()}" for k, v in NOTIFY_MODE_ICONS.items()
+    "summary": "\U0001f514 Chat",
+    "all": "\U0001f50a All",
 }
 
 # Provider selection (directory browser flow)

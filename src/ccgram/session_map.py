@@ -107,7 +107,35 @@ class SessionMapSync:
         except (json.JSONDecodeError, OSError):  # fmt: skip
             return
 
-        prefix = f"{config.tmux_session_name}:"
+        # Canonicalize any web-terminal grouped-mirror prefixes in-place before
+        # processing. Claude Code's hook can resolve pane → session non-deter-
+        # ministically across grouped sessions, so the same window can appear
+        # under both "ccgram:@N" and "web-<uuid>:@N" keys. Collapse to canonical.
+        canonical = config.tmux_session_name or "ccgram"
+        if canonical.startswith("web-"):
+            canonical = "ccgram"
+        rebuilt: dict[str, Any] = {}
+        rewrote = False
+        for k, v in session_map.items():
+            if isinstance(k, str) and k.startswith("web-") and ":" in k:
+                _, _, suffix = k.rpartition(":")
+                new_key = f"{canonical}:{suffix}"
+                # Prefer existing canonical entry if both present.
+                if new_key not in rebuilt:
+                    rebuilt[new_key] = v
+                rewrote = True
+            else:
+                if k not in rebuilt:
+                    rebuilt[k] = v
+        if rewrote:
+            session_map = rebuilt
+            # Persist the cleanup so we don't repeat work each poll.
+            try:
+                atomic_write_json(config.session_map_file, session_map)
+            except OSError:
+                pass
+
+        prefix = f"{canonical}:"
         valid_wids, old_format_sids, old_format_keys, changed = (
             self._process_session_map_entries(session_map, prefix)
         )

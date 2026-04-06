@@ -561,7 +561,7 @@ class TmuxManager:
                     check=False,
                 )
             return True
-        except subprocess.TimeoutExpired, OSError:
+        except (subprocess.TimeoutExpired, OSError):
             logger.exception("Failed to send keys to foreign window %s", target)
             return False
 
@@ -747,7 +747,7 @@ class TmuxManager:
                 "tmux",
                 "list-sessions",
                 "-F",
-                "#{session_name}",
+                "#{session_name}\t#{session_group}",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -772,9 +772,34 @@ class TmuxManager:
             else []
         )
 
+        # Parse session list and find our canonical session's group, so we can
+        # skip grouped mirrors (e.g. web terminal sessions that share windows
+        # with the canonical session via tmux session groups). Mirrors expose
+        # the same @window-ids under a different session_name, which would
+        # otherwise be treated as brand-new windows on every reconnect and
+        # trigger a flood of duplicate Telegram topic creations.
+        sessions: list[tuple[str, str]] = []
+        for line in stdout.decode().strip().split("\n"):
+            if not line:
+                continue
+            parts = line.split("\t", 1)
+            sname = parts[0]
+            sgroup = parts[1] if len(parts) > 1 else ""
+            sessions.append((sname, sgroup))
+
+        own_group = ""
+        for sname, sgroup in sessions:
+            if sname == self.session_name:
+                own_group = sgroup
+                break
+
         results: list[TmuxWindow] = []
-        for session_name in stdout.decode().strip().split("\n"):
+        for session_name, session_group in sessions:
             if not session_name or session_name == self.session_name:
+                continue
+            if own_group and session_group == own_group:
+                # Grouped mirror of our canonical session — windows are shared,
+                # so skip to avoid duplicate window discovery.
                 continue
             if patterns and not any(
                 fnmatch.fnmatch(session_name, pat) for pat in patterns

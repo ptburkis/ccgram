@@ -107,6 +107,7 @@ async def _enhance_with_llm_summary(
     window_id: str,
     transcript_path: str,
     num_turns: int,
+    session_id: str = "",
 ) -> None:
     """Async enhancement: replace Ready header with LLM summary via status queue."""
     try:
@@ -119,17 +120,17 @@ async def _enhance_with_llm_summary(
         from .message_queue import enqueue_status_update
 
         enhanced = claude_task_state.format_completion_text(
-            window_id, num_turns=num_turns
+            window_id, num_turns=num_turns, session_id=session_id
         )
         enhanced = enhanced.replace("\u2713 Ready", f"\u2713 Done \u2014 {summary}", 1)
 
         for user_id, thread_id, _window_id in users:
             notif_mode = session_manager.get_notification_mode(window_id)
-            if notif_mode not in ("muted", "errors_only"):
+            if notif_mode == "all":
                 await enqueue_status_update(
                     bot, user_id, window_id, enhanced, thread_id=thread_id
                 )
-    except RuntimeError, OSError, ValueError:
+    except (RuntimeError, OSError, ValueError):
         logger.debug("LLM summary enhancement failed", exc_info=True)
 
 
@@ -139,7 +140,7 @@ async def _handle_stop(event: HookEvent, bot: Bot) -> None:
     Topic emoji remains poller-owned. Hook-driven idle flips can fight the
     transcript/activity heuristic and cause active/idle rename churn on quiet
     topics, so Stop only updates the status bubble and broker delivery state.
-    Muted/errors_only windows get their status cleared instead.
+    Non-"all" notification mode windows get their status cleared instead.
     """
     from .message_queue import enqueue_status_update
 
@@ -158,11 +159,11 @@ async def _handle_stop(event: HookEvent, bot: Bot) -> None:
     for user_id, thread_id, window_id in users:
         claude_task_state.clear_wait_header(window_id)
         notif_mode = session_manager.get_notification_mode(window_id)
-        if notif_mode in ("muted", "errors_only"):
+        if notif_mode != "all":
             status_text = None
         else:
             status_text = claude_task_state.format_completion_text(
-                window_id, num_turns=num_turns
+                window_id, num_turns=num_turns, session_id=event.session_id
             )
         await enqueue_status_update(
             bot, user_id, window_id, status_text, thread_id=thread_id
@@ -184,7 +185,8 @@ async def _handle_stop(event: HookEvent, bot: Bot) -> None:
 
             asyncio.create_task(
                 _enhance_with_llm_summary(
-                    bot, users, first_window_id, transcript_path, num_turns
+                    bot, users, first_window_id, transcript_path, num_turns,
+                    session_id=event.session_id,
                 )
             )
 

@@ -697,23 +697,22 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         structlog.contextvars.bind_contextvars(
             window_id=window_id, session_id=msg.session_id
         )
-        # Check notification mode — skip suppressed messages.
-        # All tool_use/tool_result MUST pass through regardless of mode: the message
-        # queue edits tool_use messages in-place when tool_result arrives, so filtering
-        # one half would break pairing and leave orphaned messages. This means muted/
-        # errors_only sessions still deliver tool flow — an accepted trade-off.
+        # Notification mode filter.
+        # In "summary" mode (the default), only prose text reaches the user — tool
+        # calls, tool results, thinking blocks, and other non-text content are
+        # dropped. Both halves of a tool_use/tool_result pair are dropped together,
+        # so the message queue's in-place edit logic never sees an orphan.
+        # Interactive UI tools (AskUserQuestion / ExitPlanMode / request_user_input)
+        # are exempted from filtering — they need to reach the early-exit handler
+        # below so the user can answer them.
         notif_mode = session_manager.get_notification_mode(window_id)
-        is_tool_flow = msg.tool_name in INTERACTIVE_TOOL_NAMES or msg.content_type in (
-            "tool_use",
-            "tool_result",
-        )
-        if not is_tool_flow:
-            if notif_mode == "muted":
-                continue
-            if notif_mode == "errors_only" and not _ERROR_KEYWORDS_RE.search(
-                msg.text or ""
-            ):
-                continue
+        is_interactive_tool = msg.tool_name in INTERACTIVE_TOOL_NAMES
+        if (
+            notif_mode == "summary"
+            and not is_interactive_tool
+            and msg.content_type != "text"
+        ):
+            continue
 
         # Handle interactive tools specially - capture terminal and send UI
         if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":

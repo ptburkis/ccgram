@@ -139,7 +139,7 @@ async def _transition_to_idle(
     await update_topic_emoji(bot, chat_id, thread_id, "idle", display)
     lifecycle_strategy.clear_autoclose_timer(user_id, thread_id)
     lifecycle_strategy.clear_typing_state(user_id, thread_id)
-    if notif_mode not in ("muted", "errors_only"):
+    if notif_mode == "all":
         from .callback_data import IDLE_STATUS_TEXT
 
         await enqueue_status_update(
@@ -479,7 +479,7 @@ async def update_status_message(
         claude_task_state.set_last_status(window_id, status_line)
         terminal_strategy.mark_seen_status(window_id)
         await _send_typing_throttled(bot, user_id, thread_id)
-        if notif_mode not in ("muted", "errors_only"):
+        if notif_mode == "all":
             from .hook_events import build_subagent_label, get_subagent_names
 
             subagent_names = get_subagent_names(window_id)

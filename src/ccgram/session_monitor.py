@@ -55,6 +55,33 @@ _SessionMapError = (json.JSONDecodeError, OSError)
 
 _MSG_PREVIEW_LENGTH = 80
 
+# Tmux session-name prefix that indicates a temporary grouped mirror created
+# by the web terminal (terminal-server.py spawns "web-<window>-<uuid>" sessions
+# in the same tmux group as the canonical session). When Claude Code's stop
+# hook resolves the pane, tmux's display-message can return the mirror name
+# instead of the canonical, producing window_keys that look distinct but refer
+# to the same pane. We canonicalize at read time so downstream lookups all
+# converge on the canonical "<tmux_session_name>:@<id>" form.
+_WEB_MIRROR_SESSION_PREFIX = "web-"
+
+
+def _canonicalize_window_key(window_key: str) -> str:
+    """Strip web-terminal grouped-mirror prefixes from a window_key.
+
+    Replaces "web-<anything>:<window_id>" with "<canonical>:<window_id>", where
+    canonical is config.tmux_session_name. Other formats pass through unchanged.
+    """
+    if not window_key or ":" not in window_key:
+        return window_key
+    session_part, _, window_part = window_key.rpartition(":")
+    if not session_part.startswith(_WEB_MIRROR_SESSION_PREFIX):
+        return window_key
+    canonical = config.tmux_session_name or "ccgram"
+    # Avoid recursive prefix if config itself was auto-detected to a mirror.
+    if canonical.startswith(_WEB_MIRROR_SESSION_PREFIX):
+        canonical = "ccgram"
+    return f"{canonical}:{window_part}"
+
 
 def _resolve_provider_for_file(window_id: str, file_path: Path):
     """Prefer transcript-path provider hints when a hookful state goes stale."""
@@ -214,7 +241,9 @@ class SessionMonitor:
 
                     event = HookEvent(
                         event_type=data.get("event", ""),
-                        window_key=data.get("window_key", ""),
+                        window_key=_canonicalize_window_key(
+                            data.get("window_key", "")
+                        ),
                         session_id=data.get("session_id", ""),
                         data=data.get("data", {}),
                         timestamp=data.get("ts", 0.0),
