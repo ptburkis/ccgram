@@ -273,6 +273,25 @@ async def update_topic_emoji(
     if chat_id in _disabled_chats:
         return
 
+    # In "summary" notification mode (the default chat-only experience),
+    # suppress all topic-name emoji churn — yellow/green active/idle/done
+    # markers are "background info" the user didn't ask to see. Look up the
+    # window bound to this thread and check its notification mode.
+    try:
+        from ..session import session_manager
+        from ..thread_router import thread_router
+
+        window_id_for_thread = thread_router.get_window_for_chat_thread(
+            chat_id, thread_id
+        )
+        if window_id_for_thread:
+            notif_mode = session_manager.get_notification_mode(window_id_for_thread)
+            if notif_mode != "all":
+                return
+    except (ImportError, AttributeError):
+        # If lookup fails for any reason, fall through and update normally.
+        pass
+
     key = (chat_id, thread_id)
     clean_name, name_changed = _resolve_topic_name(key, display_name)
 
