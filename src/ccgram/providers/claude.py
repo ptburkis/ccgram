@@ -211,6 +211,7 @@ class ClaudeProvider:
         window_key: str,  # noqa: ARG002 — protocol signature
         *,
         max_age: float | None = None,  # noqa: ARG002 — protocol signature
+        pane_tty: str = "",  # noqa: ARG002 — protocol signature
     ) -> SessionStartEvent | None:
         return None  # Claude uses hooks, not transcript discovery
 

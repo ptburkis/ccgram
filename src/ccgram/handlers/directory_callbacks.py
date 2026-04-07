@@ -599,14 +599,11 @@ async def _create_window_and_bind(
         await safe_edit(query, f"✅ {message}")
         return
 
-    try:
-        await context.bot.edit_forum_topic(
-            chat_id=thread_router.resolve_chat_id(user_id, pending_thread_id),
-            message_thread_id=pending_thread_id,
-            name=format_topic_name_for_mode(created_wname, approval_mode),
-        )
-    except TelegramError as e:
-        logger.debug("Failed to rename topic: %s", e)
+    # Preserve the user's chosen topic name. Earlier versions of this flow
+    # auto-renamed the topic to the directory basename + a mode badge, which
+    # overwrote whatever name the user typed when creating the topic in
+    # Telegram. The window name is still tracked internally so ccgram knows
+    # the project context — only the visible Telegram title is left alone.
 
     await safe_edit(
         query,

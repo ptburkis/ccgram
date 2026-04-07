@@ -101,6 +101,7 @@ async def _find_and_register_transcript(
     state: "WindowState",
     providers_to_try: list[tuple[str, "AgentProvider"]],
     pane_alive: bool,
+    pane_tty: str = "",
 ) -> None:
     """Search for transcripts among candidate providers and register if found."""
     window_key = (
@@ -116,6 +117,7 @@ async def _find_and_register_transcript(
             state.cwd,
             window_key,
             max_age=max_age,
+            pane_tty=pane_tty,
         )
         if not event:
             continue
@@ -191,4 +193,7 @@ async def discover_and_register_transcript(
         return
 
     pane_alive = w is not None and not is_shell_prompt(w.pane_current_command)
-    await _find_and_register_transcript(window_id, state, providers_to_try, pane_alive)
+    pane_tty = w.pane_tty if w else ""
+    await _find_and_register_transcript(
+        window_id, state, providers_to_try, pane_alive, pane_tty=pane_tty
+    )

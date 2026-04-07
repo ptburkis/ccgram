@@ -662,6 +662,7 @@ class GeminiProvider(JsonlProvider):
         window_key: str,
         *,
         max_age: float | None = None,
+        pane_tty: str = "",  # noqa: ARG002 — protocol signature, unused for Gemini
     ) -> SessionStartEvent | None:
         """Discover latest Gemini transcript matching cwd.
 

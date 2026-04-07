@@ -515,6 +515,110 @@ def _read_codex_session_meta(fpath: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _resolve_jsonl_for_pty(pane_tty: str) -> Path | None:
+    """Find the Codex transcript JSONL currently open by the process on *pane_tty*.
+
+    On Linux, walks ``/proc/*/fd/`` looking for a process whose stdin (fd 0)
+    is the given tty AND that has a ``~/.codex/sessions/...jsonl`` open in
+    any other fd. Used to disambiguate between multiple Codex processes in
+    the same project directory — different processes have different ttys
+    even if they have the same cwd. Returns None on non-Linux or if no
+    matching process / open transcript is found.
+
+    Note: only the directly-attached process (e.g. ``node /usr/bin/codex``)
+    has the tty as fd 0; the actual rust ``codex`` binary that writes the
+    JSONL is its child. We walk to find children whose parent is on that tty.
+    """
+    if not pane_tty:
+        return None
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return None  # not Linux
+
+    # Step 1: find the pid whose fd 0 is pane_tty.
+    # Note: Path.readlink() returns a Path, not a str — must convert with str()
+    # for the comparison or it silently never matches.
+    parent_pid: int | None = None
+    try:
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                fd0 = (entry / "fd" / "0").readlink()
+            except OSError:
+                continue
+            if str(fd0) == pane_tty:
+                parent_pid = int(entry.name)
+                break
+    except OSError:
+        return None
+
+    if parent_pid is None:
+        return None
+
+    # Step 2: collect parent and all descendant pids (codex spawns a child
+    # rust binary that holds the JSONL fd).
+    pids_to_check: list[int] = [parent_pid]
+    try:
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat_data = (entry / "stat").read_text()
+            except OSError:
+                continue
+            # /proc/<pid>/stat fields after comm: state, ppid, ...
+            # comm is in parens and may contain spaces, so split from the right.
+            try:
+                rparen = stat_data.rindex(")")
+                fields = stat_data[rparen + 2 :].split()
+                ppid = int(fields[1])
+            except (ValueError, IndexError):
+                continue
+            if ppid == parent_pid:
+                pids_to_check.append(int(entry.name))
+    except OSError:
+        return None
+
+    # Recurse one more level for grandchildren (covers node → wrapper → rust).
+    extra: list[int] = []
+    try:
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat_data = (entry / "stat").read_text()
+            except OSError:
+                continue
+            try:
+                rparen = stat_data.rindex(")")
+                fields = stat_data[rparen + 2 :].split()
+                ppid = int(fields[1])
+            except (ValueError, IndexError):
+                continue
+            if ppid in pids_to_check and int(entry.name) not in pids_to_check:
+                extra.append(int(entry.name))
+    except OSError:
+        pass
+    pids_to_check.extend(extra)
+
+    # Step 3: scan fds for any open Codex JSONL transcript.
+    sessions_dir = str(Path.home() / ".codex" / "sessions")
+    for pid in pids_to_check:
+        try:
+            fd_dir = proc_root / str(pid) / "fd"
+            for fd in fd_dir.iterdir():
+                try:
+                    target = str(fd.readlink())
+                except OSError:
+                    continue
+                if target.startswith(sessions_dir) and target.endswith(".jsonl"):
+                    return Path(target)
+        except OSError:
+            continue
+    return None
+
+
 class CodexProvider(JsonlProvider):
     """AgentProvider implementation for OpenAI Codex CLI."""
 
@@ -665,16 +769,29 @@ class CodexProvider(JsonlProvider):
         window_key: str,
         *,
         max_age: float | None = None,
+        pane_tty: str = "",
     ) -> SessionStartEvent | None:
-        """Scan ~/.codex/sessions/ for the most recent transcript matching cwd.
+        """Scan ~/.codex/sessions/ for the transcript belonging to this pane.
 
         Codex transcript path: ~/.codex/sessions/YYYY/MM/DD/<name>-<ts>-<uuid>.jsonl
         First line: {"type": "session_meta", "payload": {"id": "<uuid>", "cwd": "..."}}
+
+        Resolution strategy:
+          1. **pty-based** (Linux only): if ``pane_tty`` is provided, find the
+             specific Codex process using that tty and look up the JSONL it
+             has open in /proc/<pid>/fd/. This correctly disambiguates between
+             multiple Codex processes running in the same project directory.
+          2. **cwd-based fallback**: if pty resolution fails or yields nothing,
+             scan recent transcripts and pick the newest one whose ``session_meta``
+             cwd matches. This is racy when two Codex sessions share a cwd but
+             is the only option on macOS / when /proc isn't available.
 
         Args:
             max_age: Maximum transcript age in seconds. ``None`` uses the
                 default ``_TRANSCRIPT_MAX_AGE_SECS`` (120s). Pass ``0`` or
                 negative to disable the age check entirely.
+            pane_tty: Controlling tty of the tmux pane (e.g. ``/dev/pts/14``).
+                When set, used for pty-based disambiguation.
         """
         sessions_dir = Path.home() / ".codex" / "sessions"
         if not sessions_dir.is_dir():
@@ -682,6 +799,23 @@ class CodexProvider(JsonlProvider):
 
         import time
 
+        # Strategy 1: pty-based disambiguation.
+        if pane_tty:
+            jsonl_path = _resolve_jsonl_for_pty(pane_tty)
+            if jsonl_path is not None:
+                meta = _read_codex_session_meta(jsonl_path)
+                if meta:
+                    session_id = meta.get("id", "")
+                    file_cwd = meta.get("cwd", "") or cwd
+                    if session_id:
+                        return SessionStartEvent(
+                            session_id=session_id,
+                            cwd=file_cwd,
+                            transcript_path=str(jsonl_path),
+                            window_key=window_key,
+                        )
+
+        # Strategy 2: cwd-based fallback (legacy behavior).
         age_limit = _TRANSCRIPT_MAX_AGE_SECS if max_age is None else max_age
 
         jsonl_files = _collect_codex_sessions(sessions_dir)

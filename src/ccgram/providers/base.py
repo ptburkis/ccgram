@@ -248,6 +248,7 @@ class AgentProvider(Protocol):
         window_key: str,
         *,
         max_age: float | None = None,
+        pane_tty: str = "",
     ) -> SessionStartEvent | None:
         """Discover transcript for a hookless provider session.
 
@@ -255,6 +256,12 @@ class AgentProvider(Protocol):
         matching the given working directory. Returns a SessionStartEvent
         if found, None otherwise. Implementations may optionally honor
         ``max_age`` (seconds) to ignore stale transcript files.
+
+        ``pane_tty`` (if non-empty) is the controlling tty of the tmux pane
+        (e.g. ``/dev/pts/14``). Implementations that need to disambiguate
+        between multiple agent processes running in the same cwd should use
+        the pty to find the specific process and its open transcript file.
+        Providers without per-process disambiguation can ignore it.
 
         Only useful for providers without hook support (Codex, Gemini).
         Providers with hooks (Claude) return None.
