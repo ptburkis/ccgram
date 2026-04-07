@@ -120,9 +120,18 @@ UI_PATTERNS: list[UIPattern] = [
     # non-selected list item, this catches ANY selection UI.
     # context_above=10 pulls in the question/description text above the
     # cursor.  min_gap=1 for compact prompts.
+    #
+    # Important: only ❯ (U+276F) is allowed as the top cursor. The visually
+    # similar ›  (U+203A, single right-pointing angle quote) MUST NOT be in
+    # this set — Claude Code uses › as the prefix for quoted user messages
+    # in its conversation render (e.g. "› Sorry, can you …"). Including ›
+    # caused false positives where any prose response containing a quoted
+    # user message followed by a numbered list (very common!) was mistaken
+    # for an interactive selection UI, truncating the agent's reply and
+    # rendering phantom Esc/arrow keyboards in Telegram.
     UIPattern(
         name="SelectionUI",
-        top=(re.compile(r"^\s*[❯›]\s"),),
+        top=(re.compile(r"^\s*❯\s"),),
         bottom=(
             re.compile(r"^\s*Esc to (cancel|exit)"),
             re.compile(r"^\s*Enter to (select|confirm|continue)"),
