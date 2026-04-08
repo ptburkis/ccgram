@@ -89,11 +89,41 @@ def _resolve_window_states(
     return changed
 
 
+def _lookup_window_name(
+    wid: str,
+    window_display_names: dict,
+    window_states: dict | None,
+) -> str:
+    """Find the canonical window name for a stale window_id.
+
+    Checks multiple sources in priority order:
+    1. window_display_names[wid]
+    2. window_states[wid].window_name
+    3. The wid itself (fallback — matches the old behaviour)
+
+    This lets us heal bindings even when one source dict has lost track
+    of the display name. Without this, a thread binding to a dead @N
+    whose name is only in window_states but not window_display_names
+    would never heal and would keep showing the recovery UI.
+    """
+    name = window_display_names.get(wid)
+    if name:
+        return name
+    if window_states is not None:
+        state = window_states.get(wid)
+        if state is not None:
+            ws_name = getattr(state, "window_name", "") or ""
+            if ws_name:
+                return ws_name
+    return wid
+
+
 def _resolve_thread_bindings(
     thread_bindings: dict,
     window_display_names: dict,
     live_by_name: dict[str, str],
     live_ids: set[str],
+    window_states: dict | None = None,
 ) -> bool:
     """Re-resolve thread_bindings dict in-place. Returns True if changed."""
     changed = False
@@ -107,14 +137,25 @@ def _resolve_thread_bindings(
             if is_window_id(val):
                 if val in live_ids:
                     new_bindings[tid] = val
-                elif new_id := live_by_name.get(window_display_names.get(val, val)):
-                    logger.debug("Re-resolved thread binding %s -> %s", val, new_id)
-                    new_bindings[tid] = new_id
-                    window_display_names[new_id] = window_display_names.get(val, val)
-                    changed = True
                 else:
-                    # Keep dead window binding — /restore needs it
-                    new_bindings[tid] = val
+                    name = _lookup_window_name(
+                        val, window_display_names, window_states
+                    )
+                    new_id = live_by_name.get(name)
+                    if new_id:
+                        logger.info(
+                            "Healed thread binding %d: %s -> %s (name=%s)",
+                            tid,
+                            val,
+                            new_id,
+                            name,
+                        )
+                        new_bindings[tid] = new_id
+                        window_display_names[new_id] = name
+                        changed = True
+                    else:
+                        # Keep dead window binding — /restore needs it
+                        new_bindings[tid] = val
             elif new_id := live_by_name.get(val):
                 logger.debug("Migrating thread binding %s -> %s", val, new_id)
                 new_bindings[tid] = new_id
@@ -170,6 +211,24 @@ def _resolve_offsets(
     return changed
 
 
+def _purge_corrupt_display_names(window_display_names: dict) -> bool:
+    """Remove display-name entries for non-canonical window keys.
+
+    CCGram can accumulate stale entries in window_display_names when it's
+    restarted from inside a web-terminal mirror session (keys like
+    "web-...:@N" or "ccgram:@N"). These entries pollute the name lookup
+    and prevent healing from working correctly. We drop any key that
+    isn't a plain "@N" window id.
+    """
+    changed = False
+    for key in list(window_display_names.keys()):
+        if not is_window_id(key):
+            del window_display_names[key]
+            changed = True
+            logger.info("Purged corrupt display name entry: %s", key)
+    return changed
+
+
 def resolve_stale_ids(
     live_windows: list[LiveWindow],
     window_states: dict,
@@ -181,18 +240,26 @@ def resolve_stale_ids(
 
     Mutates all dicts in-place. Returns True if any changes were made.
 
-    Handles two cases:
+    Handles three cases:
     1. Old-format migration: window_name keys -> window_id keys
     2. Stale IDs: window_id no longer exists but display name matches a live window
+    3. Corrupt display name entries (web-* / ccgram:* prefixes) — purged
     """
     live_by_name: dict[str, str] = {w.window_name: w.window_id for w in live_windows}
     live_ids: set[str] = {w.window_id for w in live_windows}
 
-    changed = _resolve_window_states(
+    # Pre-clean corrupt display name entries before they confuse healing.
+    changed = _purge_corrupt_display_names(window_display_names)
+
+    changed |= _resolve_window_states(
         window_states, window_display_names, live_by_name, live_ids
     )
     changed |= _resolve_thread_bindings(
-        thread_bindings, window_display_names, live_by_name, live_ids
+        thread_bindings,
+        window_display_names,
+        live_by_name,
+        live_ids,
+        window_states=window_states,
     )
     changed |= _resolve_offsets(
         user_window_offsets, window_display_names, live_by_name, live_ids
