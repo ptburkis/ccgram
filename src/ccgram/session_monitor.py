@@ -819,6 +819,17 @@ class SessionMonitor:
                 # Detect unbound tmux windows (no Claude Code yet)
                 all_windows = await tmux_manager.list_windows()
                 external_windows = await tmux_manager.discover_external_sessions()
+                # Defensive: filter out web-terminal grouped mirror windows.
+                # discover_external_sessions has its own skip logic but it can
+                # fail when CCGram auto-detected its own session as a mirror.
+                external_windows = [
+                    w
+                    for w in external_windows
+                    if not (
+                        ":" in w.window_id
+                        and w.window_id.split(":", 1)[0].startswith("web-")
+                    )
+                ]
                 all_windows = all_windows + external_windows
                 live_window_ids = {w.window_id for w in all_windows}
                 session_manager.prune_session_map(live_window_ids)

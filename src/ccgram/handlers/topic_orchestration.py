@@ -198,6 +198,17 @@ async def handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
     Skips if the window is already bound to a topic. Creates one topic per
     unique group chat, binds all users in that chat.
     """
+    # Defensive: never create topics for web-terminal grouped mirror sessions.
+    # These have qualified window_ids like "web-<name>-<uuid>:@N" and are
+    # transient mirrors of the canonical ccgram session windows. Auto-creating
+    # topics for them produces duplicate topics on every web-terminal connect.
+    if ":" in event.window_id and event.window_id.split(":", 1)[0].startswith("web-"):
+        logger.debug(
+            "Skipping topic creation for web-terminal mirror window %s",
+            event.window_id,
+        )
+        return
+
     if _is_window_already_bound(event.window_id):
         logger.debug(
             "New window %s already bound, skipping topic creation", event.window_id
