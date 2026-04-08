@@ -247,6 +247,10 @@ async def _handle_subagent_start(event: HookEvent, bot: Bot) -> None:
         name,
     )
 
+    # Skip status updates in summary mode — only prose responses reach the user.
+    if session_manager.get_notification_mode(window_id) != "all":
+        return
+
     for user_id, thread_id, _ in users:
         await enqueue_status_update(
             bot,
@@ -282,6 +286,10 @@ async def _handle_subagent_stop(event: HookEvent, bot: Bot) -> None:
         name,
     )
 
+    # Skip status updates in summary mode.
+    if session_manager.get_notification_mode(window_id) != "all":
+        return
+
     for user_id, thread_id, _ in users:
         await enqueue_status_update(
             bot,
@@ -308,6 +316,9 @@ async def _handle_teammate_idle(event: HookEvent, bot: Bot) -> None:
     )
 
     for user_id, thread_id, window_id in users:
+        # Skip status updates in summary mode.
+        if session_manager.get_notification_mode(window_id) != "all":
+            continue
         text = f"\U0001f4a4 Teammate '{teammate_name}' went idle"
         await enqueue_status_update(bot, user_id, window_id, text, thread_id=thread_id)
 
@@ -400,6 +411,10 @@ async def _handle_task_completed(event: HookEvent, bot: Bot) -> None:
             await enqueue_status_update(
                 bot, user_id, window_id, None, thread_id=thread_id
             )
+            continue
+
+        # Skip free-form task completion notifications in summary mode.
+        if session_manager.get_notification_mode(window_id) != "all":
             continue
 
         text = f"\u2705 Task completed: {task_subject}"

@@ -159,7 +159,9 @@ class ClaudeTaskStateStore:
         """Retrieve the last non-idle status text for a window."""
         return self._last_status.get(window_id)
 
-    def format_completion_text(self, window_id: str, num_turns: int = 0) -> str:
+    def format_completion_text(
+        self, window_id: str, num_turns: int = 0, session_id: str = ""
+    ) -> str:
         """Build an enriched Ready message with task checklist and last status.
 
         Returns:
@@ -173,10 +175,18 @@ class ClaudeTaskStateStore:
 
             Falls back to ``"✓ Ready\\nLast: <status> · N turns"`` when no
             task checklist, or bare ``"✓ Ready"`` when nothing available.
+
+        When *session_id* is provided, the task snapshot is only included if it
+        belongs to that session — this prevents stale tasks from a previous
+        session rendering on Stop events.
         """
         from .handlers.callback_data import IDLE_STATUS_TEXT
 
         snapshot = self.get_snapshot(window_id)
+        if snapshot is not None and session_id:
+            state = self._window_states.get(window_id)
+            if state is not None and state.session_id != session_id:
+                snapshot = None
         last_status = self.get_last_status(window_id)
 
         if snapshot is None and last_status is None:
