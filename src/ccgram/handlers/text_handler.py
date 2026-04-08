@@ -54,6 +54,69 @@ _BASH_OUTPUT_LIMIT = 3800
 # Active bash capture tasks: (user_id, thread_id) -> asyncio.Task
 _bash_capture_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
 
+# --- Context injection --------------------------------------------------
+# Per-project context pre-load. If a project has `context/CONTEXT.md` we
+# prepend a compact context block to every user message before sending to
+# the tmux window. This gives the agent fresh working memory each turn
+# without requiring it to re-read memory files.
+#
+# The context block is invisible to Telegram (it's only added between
+# CCGram and the tmux input). The agent sees it as part of the user turn.
+_CONTEXT_MAX_CHARS = 1500  # Hard ceiling on CONTEXT.md size we honour
+
+
+def _build_context_prefix(window_id: str) -> str:
+    """Return a formatted context block to prepend to the user's message.
+
+    Looks up the project cwd from the session_map, checks for
+    `<cwd>/context/CONTEXT.md`, and if present, wraps it with a header
+    containing today's date and a pointer to the session log.
+
+    Returns an empty string if no CONTEXT.md exists or on any error —
+    context injection is best-effort and must never break message delivery.
+    """
+    try:
+        from ..session import session_manager as _sm
+
+        wstate = _sm.window_states.get(window_id)
+        if not wstate or not wstate.cwd:
+            return ""
+        cwd = Path(wstate.cwd)
+        context_file = cwd / "context" / "CONTEXT.md"
+        if not context_file.exists():
+            return ""
+        content = context_file.read_text(encoding="utf-8").strip()
+        if not content:
+            return ""
+        if len(content) > _CONTEXT_MAX_CHARS:
+            content = content[:_CONTEXT_MAX_CHARS] + "\n... (truncated)"
+
+        from datetime import datetime
+
+        today = datetime.now().strftime("%a %d %b %Y")
+        session_log = cwd / "logs" / "session-log.md"
+        log_hint = (
+            f"If you need more recent context, read {session_log.relative_to(cwd)}"
+            if session_log.exists()
+            else ""
+        )
+
+        parts = [
+            "\u2501\u2501\u2501 JAMES CONTEXT (auto-injected) \u2501\u2501\u2501",
+            f"Today: {today}",
+            "",
+            content,
+            "",
+        ]
+        if log_hint:
+            parts.append(log_hint)
+        parts.append("\u2501\u2501\u2501")
+        parts.append("")  # blank line before user message
+        return "\n".join(parts)
+    except Exception:
+        logger.debug("Context prefix build failed", exc_info=True)
+        return ""
+
 
 @topic_state.register("topic")
 def cancel_bash_capture(user_id: int, thread_id: int) -> None:
@@ -326,7 +389,13 @@ async def _forward_message(
 
     clear_probe_failures(window_id)
 
-    success, err_message = await send_to_window(window_id, text)
+    # Prepend per-project context block (if the project has context/CONTEXT.md).
+    # Silently returns empty string for projects without one, so no-op for all
+    # projects except those opted in via the file.
+    context_prefix = _build_context_prefix(window_id)
+    send_text = context_prefix + text if context_prefix else text
+
+    success, err_message = await send_to_window(window_id, send_text)
     if not success:
         await safe_reply(message, f"\u274c {err_message}")
         return
