@@ -164,6 +164,13 @@ class TranscriptParser:
     _RE_SYSTEM_TAGS = re.compile(
         r"<(bash-input|bash-stdout|bash-stderr|local-command-caveat|system-reminder)"
     )
+    # Context injection block prepended by text_handler._build_context_prefix.
+    # Matched and stripped from user entries so it stays invisible in Telegram
+    # echoes — the full block is still present in the JSONL for the agent.
+    _RE_CONTEXT_INJECTION = re.compile(
+        r"^\u2501{3} JAMES CONTEXT \(auto-injected\) \u2501{3}\n.*?\n\u2501{3}\n+",
+        re.DOTALL,
+    )
 
     @staticmethod
     def _format_edit_diff(old_string: str, new_string: str) -> str:
@@ -338,6 +345,11 @@ class TranscriptParser:
             text = cls.extract_text_only(content)
         else:
             text = str(content) if content else ""
+
+        # Strip auto-injected context block from user messages — it should
+        # never be visible in history display or Telegram echo.
+        if msg_type == "user" and text:
+            text = cls._RE_CONTEXT_INJECTION.sub("", text, count=1).strip()
 
         # Detect local command responses in user messages.
         # These are rendered as bot replies: "❯ /cmd\n  ⎿  output"
@@ -723,7 +735,10 @@ class TranscriptParser:
                             )
 
                     elif btype == "text":
-                        t = cls._RE_ANSI.sub("", block.get("text", "")).strip()
+                        t = cls._RE_ANSI.sub("", block.get("text", ""))
+                        # Strip any auto-injected context block before displaying.
+                        t = cls._RE_CONTEXT_INJECTION.sub("", t, count=1)
+                        t = t.strip()
                         if t and not cls._RE_SYSTEM_TAGS.search(t):
                             user_text_parts.append(t)
 
