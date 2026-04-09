@@ -55,6 +55,101 @@ _SessionMapError = (json.JSONDecodeError, OSError)
 
 _MSG_PREVIEW_LENGTH = 80
 
+# How often reconcile_session_map() actually does work, regardless of how
+# often the monitor loop calls it. Rate-limits project-dir scans so we don't
+# stat the filesystem every 2 seconds. 30s is fast enough that drift heals
+# before the user notices but slow enough not to be a hot loop.
+_RECONCILE_INTERVAL_SECS = 30.0
+
+# Maximum age (seconds) of a Claude jsonl file to consider it an active
+# session for reconciliation. Older files are assumed stale and ignored.
+_RECONCILE_MAX_JSONL_AGE_SECS = 3600.0
+
+# System-wrapper markers that appear in user-role jsonl entries but are not
+# real human messages (tool results, task notifications, etc.). The
+# reconciler's backfill-offset-finder skips these when picking the "last
+# real user turn" to rewind to.
+_SYSTEM_WRAPPER_MARKERS = (
+    "<task-notification>",
+    "<tool_use_error>",
+    "<bash-input>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "<system-reminder>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+    "<local-command-caveat>",
+)
+
+
+def _find_last_user_turn_offset(file_path: "Path") -> int:
+    """Find the byte offset of the last REAL human user message in a Claude jsonl.
+
+    "Real" means type=user, content is non-empty text, and the text doesn't
+    start with any of the system-wrapper markers (tool results, task
+    notifications, etc.). This is used by the reconciler to pick an initial
+    read offset when it inserts a recovered session_map entry: we rewind to
+    the start of the last real turn so the user sees the most recent
+    conversation context mirror to Telegram, without flooding them with
+    the entire session history.
+
+    Returns the byte offset of the last real user line, or the file size
+    (no backfill) if no qualifying line is found or on any read error.
+    """
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return 0
+
+    try:
+        text = data.decode("utf-8", errors="replace")
+    except (UnicodeDecodeError, ValueError):
+        return len(data)
+
+    # Walk line starts so we can map back from parsed line index to byte offset
+    raw_lines = text.split("\n")
+    line_offsets: list[int] = []
+    cum = 0
+    for ln in raw_lines:
+        line_offsets.append(cum)
+        cum += len(ln.encode("utf-8")) + 1  # +1 for the \n delimiter
+
+    for i in range(len(raw_lines) - 1, -1, -1):
+        line = raw_lines[i].strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if d.get("type") != "user":
+            continue
+        msg = d.get("message", {})
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            t = content
+        elif isinstance(content, list):
+            t = ""
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    t = block.get("text", "")
+                    break
+        else:
+            t = ""
+        if not t:
+            continue
+        stripped = t.lstrip()
+        if any(stripped.startswith(m) for m in _SYSTEM_WRAPPER_MARKERS):
+            continue
+        return line_offsets[i]
+
+    # No real user turn found — default to end of file (no backfill).
+    return len(data)
+
+
 # Tmux session-name prefix that indicates a temporary grouped mirror created
 # by the web terminal (terminal-server.py spawns "web-<window>-<uuid>" sessions
 # in the same tmux group as the canonical session). When Claude Code's stop
@@ -178,6 +273,9 @@ class SessionMonitor:
         self._file_mtimes: dict[str, float] = {}  # session_id -> last_seen_mtime
         # Transcript activity timestamps for status heuristic (monotonic time)
         self._last_activity: dict[str, float] = {}  # session_id -> monotonic time
+        # Timestamp of the last successful reconcile_session_map pass.
+        # Rate-limits drift healing so it doesn't run every poll cycle.
+        self._last_reconcile_time: float = 0.0
 
     def get_last_activity(self, session_id: str) -> float | None:
         """Get monotonic timestamp of last transcript activity for a session."""
@@ -789,6 +887,177 @@ class SessionMonitor:
 
         return current_map
 
+    async def reconcile_session_map(self) -> None:
+        """Heal drift: ensure every thread-bound window has a session_map entry.
+
+        Walks ``thread_router.iter_thread_bindings()`` and for each bound
+        window_id checks that ``session_map.json`` has a matching entry.
+        For any missing entries, tries to reconstruct the entry from the
+        live tmux window (cwd, provider) plus the most recently modified
+        Claude jsonl file in the window's project directory.
+
+        This closes the failure mode where ``prune_session_map`` removes an
+        entry due to a transient tmux ``list-windows`` miss (e.g. during a
+        restart or ssh reconnect hiccup) but the window is still alive and
+        the user expects it to mirror to Telegram. Without reconciliation,
+        the entry stays missing until a fresh SessionStart hook fires,
+        which only happens on ``claude`` startup — not on every turn.
+
+        Conservative: only reconstructs when there's strong evidence:
+          - tmux window is live
+          - window cwd maps to an existing Claude projects directory
+          - that directory contains a jsonl modified within the last hour
+          - the jsonl's first line parses as a valid Claude entry
+        Otherwise leaves the entry missing so SessionStart can populate it.
+
+        Rate-limited to ``_RECONCILE_INTERVAL_SECS`` so this isn't a hot
+        loop hitting the filesystem every 2 seconds.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if now - self._last_reconcile_time < _RECONCILE_INTERVAL_SECS:
+            return
+        self._last_reconcile_time = now
+
+        try:
+            from .thread_router import thread_router
+        except ImportError:
+            return
+
+        # Collect bare-id bindings (@N form, not qualified web-*:@N)
+        bound_ids: set[str] = set()
+        for _uid, _tid, wid in thread_router.iter_thread_bindings():
+            if wid and wid.startswith("@") and ":" not in wid:
+                bound_ids.add(wid)
+        if not bound_ids:
+            return
+
+        # Load session_map
+        if not config.session_map_file.exists():
+            return
+        try:
+            sm = json.loads(config.session_map_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            return
+
+        canonical = config.tmux_session_name or "ccgram"
+        if canonical.startswith("web-"):
+            canonical = "ccgram"
+        prefix = f"{canonical}:"
+        missing: list[str] = [w for w in bound_ids if f"{prefix}{w}" not in sm]
+        if not missing:
+            return
+
+        # Pull live tmux windows once for lookup
+        try:
+            live_windows = await tmux_manager.list_windows()
+        except (OSError, _PathResolveError):
+            return
+        win_by_id = {w.window_id: w for w in live_windows}
+
+        now_wall = _time.time()
+        healed: list[tuple[str, str, str]] = []  # (wid, sid, file)
+
+        for wid in missing:
+            w = win_by_id.get(wid)
+            if w is None:
+                # Stale binding — window doesn't exist. Leave alone; other
+                # cleanup paths handle zombie bindings.
+                continue
+            cwd = w.cwd or ""
+            if not cwd:
+                continue
+
+            # Compute project dir from cwd (Claude convention)
+            project_slug = "-" + cwd.lstrip("/").replace("/", "-").replace("_", "-")
+            project_dir = config.claude_projects_path / project_slug
+            if not project_dir.is_dir():
+                continue
+
+            # Find the most recent jsonl in the project dir
+            try:
+                jsonls = sorted(
+                    project_dir.glob("*.jsonl"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+            except OSError:
+                continue
+            if not jsonls:
+                continue
+
+            chosen: Path | None = None
+            chosen_sid: str = ""
+            for j in jsonls[:5]:
+                try:
+                    mtime = j.stat().st_mtime
+                except OSError:
+                    continue
+                if now_wall - mtime > _RECONCILE_MAX_JSONL_AGE_SECS:
+                    # Sorted newest-first — everything after this is also old
+                    break
+                # Sanity check: first non-empty line must parse as JSON and
+                # look like a Claude transcript entry
+                try:
+                    with open(j, encoding="utf-8") as fh:
+                        first = ""
+                        for raw in fh:
+                            if raw.strip():
+                                first = raw
+                                break
+                    if not first:
+                        continue
+                    d = json.loads(first)
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if d.get("type") not in ("user", "assistant", "summary", "system"):
+                    continue
+                chosen = j
+                # Claude uses filename = session_id convention
+                chosen_sid = j.stem
+                break
+
+            if chosen is None or not chosen_sid:
+                continue
+
+            initial_offset = _find_last_user_turn_offset(chosen)
+
+            sm[f"{prefix}{wid}"] = {
+                "session_id": chosen_sid,
+                "cwd": cwd,
+                "window_name": w.window_name or "",
+                "transcript_path": str(chosen),
+                "provider_name": "claude",
+            }
+
+            # Pre-populate tracked_sessions so the first poll cycle after
+            # reconciliation actually backfills from initial_offset rather
+            # than the default "jump to end of file" for fresh sessions.
+            tracked = TrackedSession(
+                session_id=chosen_sid,
+                file_path=str(chosen),
+                last_byte_offset=initial_offset,
+            )
+            self.state.update_session(tracked)
+
+            healed.append((wid, chosen_sid, chosen.name))
+
+        if healed:
+            try:
+                from .utils import atomic_write_json
+
+                atomic_write_json(config.session_map_file, sm)
+            except OSError:
+                logger.exception("Failed to persist reconciled session_map")
+                return
+            self.state.save_if_dirty()
+            for wid, sid, fname in healed:
+                logger.info(
+                    "Reconciled session_map: %s -> %s (transcript=%s)",
+                    wid, sid, fname,
+                )
+
     async def _monitor_loop(self) -> None:
         """Background loop for checking session updates.
 
@@ -812,6 +1081,16 @@ class SessionMonitor:
 
                 # Load hook-based session map updates
                 await session_manager.load_session_map()
+
+                # Heal drift between thread_bindings and session_map.
+                # This runs at most every _RECONCILE_INTERVAL_SECS seconds;
+                # intermediate calls are cheap no-ops. Placed BEFORE the
+                # cleanup pass so reconciled entries don't get pruned in
+                # the same iteration that inserts them.
+                try:
+                    await self.reconcile_session_map()
+                except Exception:
+                    logger.exception("reconcile_session_map failed")
 
                 # Detect session_map changes and cleanup replaced/removed sessions
                 current_map = await self._detect_and_cleanup_changes()
