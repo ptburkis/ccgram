@@ -22,7 +22,6 @@ from ..thread_router import thread_router
 from ..tmux_manager import tmux_manager
 from .message_sender import safe_reply
 from .polling_strategies import clear_dead_notification
-from .topic_emoji import format_topic_name_for_mode
 
 logger = structlog.get_logger()
 
@@ -88,12 +87,9 @@ async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if update.message.chat.type in ("group", "supergroup"):
         thread_router.set_group_chat_id(user_id, thread_id, update.message.chat.id)
 
-    with contextlib.suppress(TelegramError):
-        await context.bot.edit_forum_topic(
-            chat_id=thread_router.resolve_chat_id(user_id, thread_id),
-            message_thread_id=thread_id,
-            name=format_topic_name_for_mode(wname, approval_mode),
-        )
+    # Preserve user-chosen topic name. /restore used to reapply
+    # "<window_name> 🎲" to the topic title, overwriting any custom title
+    # the user had set. Leave the title alone.
 
     await safe_reply(
         update.message, f"\u2705 {message}\n\nContinuing previous session."

@@ -37,7 +37,6 @@ from .callback_data import (
 from .callback_helpers import get_thread_id
 from .callback_registry import register
 from .message_sender import safe_edit, safe_send
-from .topic_emoji import format_topic_name_for_mode
 from .user_state import (
     PENDING_THREAD_ID,
     PENDING_THREAD_TEXT,
@@ -385,14 +384,9 @@ async def _create_and_bind_window(
     if chat and chat.type in ("group", "supergroup"):
         thread_router.set_group_chat_id(user_id, thread_id, chat.id)
 
-    try:
-        await context.bot.edit_forum_topic(
-            chat_id=thread_router.resolve_chat_id(user_id, thread_id),
-            message_thread_id=thread_id,
-            name=format_topic_name_for_mode(created_wname, approval_mode),
-        )
-    except TelegramError as e:
-        logger.debug("Failed to rename topic: %s", e)
+    # Preserve user-chosen topic name. Recovery used to re-apply
+    # "<window_name> 🎲" (YOLO dice), overwriting any title the user had set
+    # before the topic went into recovery. Leave the title alone.
 
     await safe_edit(query, f"\u2705 {message}\n\n{success_label}")
 

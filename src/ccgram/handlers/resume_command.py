@@ -36,7 +36,6 @@ from .callback_data import CB_RESUME_CANCEL, CB_RESUME_PAGE, CB_RESUME_PICK
 from .callback_helpers import get_thread_id
 from .callback_registry import register
 from .message_sender import safe_edit, safe_reply
-from .topic_emoji import format_topic_name_for_mode
 from .user_state import RESUME_SESSIONS
 
 logger = structlog.get_logger()
@@ -369,17 +368,10 @@ async def _handle_pick(
     if chat and chat.type in ("group", "supergroup"):
         thread_router.set_group_chat_id(user_id, thread_id, chat.id)
 
-    # Rename topic to match the window
-    try:
-        await context.bot.edit_forum_topic(
-            chat_id=thread_router.resolve_chat_id(user_id, thread_id),
-            message_thread_id=thread_id,
-            name=format_topic_name_for_mode(
-                created_wname, session_manager.get_approval_mode(created_wid)
-            ),
-        )
-    except TelegramError as e:
-        logger.debug("Failed to rename topic: %s", e)
+    # Preserve user-chosen topic name. Previous behaviour auto-renamed the
+    # topic after /resume to "<window_name> 🎲" (YOLO dice), which clobbered
+    # any title the user had set. The internal window binding is enough for
+    # ccgram to know the project context — the visible title is left alone.
 
     summary_short = picked.get("summary", "")[:40]
     await safe_edit(

@@ -32,7 +32,6 @@ from .directory_browser import (
 )
 from .callback_registry import register
 from .message_sender import safe_edit, safe_send
-from .topic_emoji import format_topic_name_for_mode
 from .user_state import PENDING_THREAD_ID, PENDING_THREAD_TEXT
 
 logger = structlog.get_logger()
@@ -196,16 +195,9 @@ async def _handle_bind(
         thread_id=thread_id,
     )
 
-    try:
-        await context.bot.edit_forum_topic(
-            chat_id=thread_router.resolve_chat_id(user_id, thread_id),
-            message_thread_id=thread_id,
-            name=format_topic_name_for_mode(
-                display, session_manager.get_approval_mode(selected_wid)
-            ),
-        )
-    except TelegramError as e:
-        logger.debug("Failed to rename topic: %s", e)
+    # Preserve user-chosen topic name. Previous behaviour auto-renamed the
+    # topic to "<window_name> 🎲" (with the YOLO dice for bypass mode), which
+    # clobbered any title the user typed when creating the topic.
 
     await safe_edit(
         query,
