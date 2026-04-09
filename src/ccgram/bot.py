@@ -965,6 +965,194 @@ async def _error_handler(_update: object, context: ContextTypes.DEFAULT_TYPE) ->
     logger.error("Unhandled bot error", exc_info=context.error)
 
 
+# ── Bot-native convenience commands ─────────────────────────────────────
+# /terminal  /dashboard  /cwd  /busy  /fleet
+#
+# These are thin informational commands that expose ambient state about
+# sessions without requiring the user to leave Telegram. They all share
+# the same topic-guard pattern and rely on the active SessionMonitor for
+# activity timestamps.
+
+# Web-terminal / dashboard base URL. Overridable via env for mrsclawd etc.
+_CCGRAM_WEB_BASE = os.environ.get(
+    "CCGRAM_WEB_BASE", "https://clawd.tail483fa1.ts.net:8443"
+)
+
+
+def _format_activity_age(elapsed_secs: float) -> str:
+    """Human-friendly '5s' / '2m' / '1h' from a seconds-elapsed value."""
+    if elapsed_secs < 60:
+        return f"{int(elapsed_secs)}s"
+    if elapsed_secs < 3600:
+        return f"{int(elapsed_secs // 60)}m"
+    return f"{int(elapsed_secs // 3600)}h"
+
+
+async def terminal_command(
+    update: Update, _context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Return a tappable URL to the web terminal for this topic's bound window."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id) or not update.message:
+        return
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        await safe_reply(update.message, "\u274c Use this command inside a topic.")
+        return
+    window_id = thread_router.get_window_for_thread(user.id, thread_id)
+    if not window_id:
+        await safe_reply(
+            update.message, "\u274c This topic is not bound to any session."
+        )
+        return
+    all_windows = await tmux_manager.list_windows()
+    window = next((w for w in all_windows if w.window_id == window_id), None)
+    if not window:
+        await safe_reply(update.message, "\u274c Window not found.")
+        return
+    url = f"{_CCGRAM_WEB_BASE}/terminal/terminal/{window.window_name}"
+    await safe_reply(
+        update.message, f"\U0001f5a5 Web terminal: {url}"
+    )
+
+
+async def dashboard_command(
+    update: Update, _context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Return a tappable URL to the Claude Hub dashboard."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id) or not update.message:
+        return
+    await safe_reply(
+        update.message, f"\U0001f4ca Dashboard: {_CCGRAM_WEB_BASE}/hub/"
+    )
+
+
+async def cwd_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the working directory of the current topic's session."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id) or not update.message:
+        return
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        await safe_reply(update.message, "\u274c Use this command inside a topic.")
+        return
+    window_id = thread_router.get_window_for_thread(user.id, thread_id)
+    if not window_id:
+        await safe_reply(
+            update.message, "\u274c This topic is not bound to any session."
+        )
+        return
+    state = session_manager.get_window_state(window_id)
+    cwd = state.cwd if state and state.cwd else ""
+    if not cwd:
+        all_windows = await tmux_manager.list_windows()
+        window = next((w for w in all_windows if w.window_id == window_id), None)
+        cwd = window.cwd if window else "(unknown)"
+    await safe_reply(update.message, f"\U0001f4c2 `{cwd}`")
+
+
+async def busy_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Report whether the current topic's session is actively processing."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id) or not update.message:
+        return
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        await safe_reply(update.message, "\u274c Use this command inside a topic.")
+        return
+    window_id = thread_router.get_window_for_thread(user.id, thread_id)
+    if not window_id:
+        await safe_reply(
+            update.message, "\u274c This topic is not bound to any session."
+        )
+        return
+    from .session_monitor import get_active_monitor
+
+    mon = get_active_monitor()
+    if mon is None:
+        await safe_reply(update.message, "\u26a0\ufe0f Monitor not active.")
+        return
+    state = session_manager.get_window_state(window_id)
+    session_id = state.session_id if state else ""
+    if not session_id:
+        await safe_reply(update.message, "\U0001f4a4 No active session.")
+        return
+    last_active = mon.get_last_activity(session_id)
+    if last_active is None:
+        await safe_reply(update.message, "\U0001f4a4 Idle (no activity recorded).")
+        return
+    import time as _time
+
+    elapsed = _time.monotonic() - last_active
+    # Using the same 10s ACTIVITY_THRESHOLD polling_strategies.py uses for
+    # "recently active" — keeps this command's answer consistent with what
+    # the typing-indicator heuristic thinks.
+    if elapsed < 10.0:
+        await safe_reply(
+            update.message, f"\u26a1 Processing \u2014 last activity {int(elapsed)}s ago"
+        )
+    else:
+        await safe_reply(
+            update.message,
+            f"\U0001f4a4 Idle for {_format_activity_age(elapsed)}",
+        )
+
+
+async def fleet_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    """One-line-per-session summary of all bound topics for this user.
+
+    Shows each bound window's name, whether it's currently active, and the
+    age of its last recorded activity. Useful for the 'what's everyone
+    doing right now' question before you pick a topic to message.
+    """
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id) or not update.message:
+        return
+    from .session_monitor import get_active_monitor
+
+    mon = get_active_monitor()
+    all_windows = await tmux_manager.list_windows()
+    win_by_id = {w.window_id: w for w in all_windows}
+
+    bound: list[tuple[int, str]] = []
+    for uid, tid, wid in thread_router.iter_thread_bindings():
+        if uid != user.id:
+            continue
+        if not wid or ":" in wid:
+            continue  # skip qualified / mirror bindings
+        bound.append((tid, wid))
+    if not bound:
+        await safe_reply(update.message, "\U0001f4a4 No bound sessions.")
+        return
+
+    import time as _time
+
+    now = _time.monotonic()
+    lines: list[str] = []
+    for tid, wid in sorted(bound, key=lambda x: x[0]):
+        window = win_by_id.get(wid)
+        if window is None:
+            lines.append(f"  \U0001f480 <dead> {wid} (thread {tid})")
+            continue
+        state = session_manager.get_window_state(wid)
+        sid = state.session_id if state else ""
+        if sid and mon is not None:
+            last = mon.get_last_activity(sid)
+            if last is None:
+                icon, age = "\U0001f4a4", "no data"
+            elif (now - last) < 10.0:
+                icon, age = "\u26a1", f"{int(now - last)}s"
+            else:
+                icon, age = "\U0001f4a4", _format_activity_age(now - last)
+        else:
+            icon, age = "\u2753", "unknown"
+        lines.append(f"  {icon} `{window.window_name}` \u2014 {age}")
+
+    body = "\U0001f916 **Fleet**\n" + "\n".join(lines)
+    await safe_reply(update.message, body)
+
+
 def create_bot() -> Application:
     # Suppress PTBUserWarning about JobQueue (we intentionally don't use it for core tasks)
     import warnings
@@ -1022,6 +1210,22 @@ def create_bot() -> Application:
     )
     application.add_handler(
         CommandHandler("restore", restore_command, filters=_group_filter)
+    )
+    # Bot-native convenience commands (Apr 2026)
+    application.add_handler(
+        CommandHandler("terminal", terminal_command, filters=_group_filter)
+    )
+    application.add_handler(
+        CommandHandler("dashboard", dashboard_command, filters=_group_filter)
+    )
+    application.add_handler(
+        CommandHandler("cwd", cwd_command, filters=_group_filter)
+    )
+    application.add_handler(
+        CommandHandler("busy", busy_command, filters=_group_filter)
+    )
+    application.add_handler(
+        CommandHandler("fleet", fleet_command, filters=_group_filter)
     )
     _load_callback_handlers()
     application.add_handler(CallbackQueryHandler(_dispatch_callback))

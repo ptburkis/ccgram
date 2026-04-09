@@ -39,8 +39,10 @@ RC_DEBOUNCE_SECONDS = 3.0
 # Consecutive topic probe failure threshold.
 MAX_PROBE_FAILURES = 3
 
-# Typing indicator throttle interval (seconds).
-TYPING_INTERVAL = 4.0
+# Typing indicator throttle interval (seconds). Set just below Telegram's
+# ~5s native auto-clear so there's no race window where the client shows
+# "not typing" briefly between our refreshes.
+TYPING_INTERVAL = 3.0
 
 # Pane count cache TTL for multi-pane scanning (seconds).
 PANE_COUNT_TTL = 5.0

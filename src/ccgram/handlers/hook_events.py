@@ -423,8 +423,45 @@ async def _handle_task_completed(event: HookEvent, bot: Bot) -> None:
         await enqueue_status_update(bot, user_id, window_id, text, thread_id=thread_id)
 
 
+# Hook events that indicate the agent is actively working on something,
+# even if the main jsonl transcript isn't being written to right now
+# (e.g. during a long subagent run, or while a Bash call is in flight).
+# These reset the activity timestamp so the typing indicator keeps firing
+# and /busy reports the session as working.
+_BUSY_HOOK_EVENTS: frozenset[str] = frozenset({
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "SubagentStart",
+    "Notification",
+    "PermissionRequest",
+})
+
+
+def _window_id_from_key(window_key: str) -> str:
+    """Strip the tmux session prefix from a window_key ("ccgram:@16" → "@16")."""
+    if ":" in window_key:
+        return window_key.rsplit(":", 1)[1]
+    return window_key
+
+
 async def dispatch_hook_event(event: HookEvent, bot: Bot) -> None:
     """Route hook events to appropriate handlers."""
+    # Mark activity for any event that indicates the agent is in a turn.
+    # This keeps the typing indicator firing and /busy accurate even when
+    # the main jsonl isn't being written (long subagent runs, long Bash
+    # calls). Cleanly ignored if the session isn't tracked yet.
+    if event.event_type in _BUSY_HOOK_EVENTS:
+        try:
+            from ..session_monitor import get_active_monitor
+            mon = get_active_monitor()
+            if mon is not None:
+                wid = _window_id_from_key(event.window_key)
+                if wid:
+                    mon.record_hook_activity(wid)
+        except (ImportError, AttributeError):
+            pass
+
     match event.event_type:
         case "Notification":
             await _handle_notification(event, bot)
@@ -454,6 +491,6 @@ async def dispatch_hook_event(event: HookEvent, bot: Bot) -> None:
             | "WorktreeRemove"
             | "PreCompact"
         ):
-            pass  # Not actionable for the bot — SessionStart handled via session_map.json
+            pass  # Not actionable beyond activity tracking above
         case _:
             logger.debug("Ignoring unknown hook event type: %s", event.event_type)

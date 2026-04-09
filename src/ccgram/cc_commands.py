@@ -61,6 +61,11 @@ _BOT_COMMANDS: list[tuple[str, str]] = [
     ("toolbar", "Show action toolbar"),
     ("verbose", "Toggle tool call batching"),
     ("upgrade", "Upgrade ccgram and restart"),
+    ("terminal", "Web terminal URL for this topic"),
+    ("dashboard", "Claude Hub dashboard URL"),
+    ("cwd", "Working directory of this session"),
+    ("busy", "Is this session processing right now?"),
+    ("fleet", "One-line status of all bound sessions"),
 ]
 
 # Telegram limits: max 100 commands, descriptions max 256 chars
