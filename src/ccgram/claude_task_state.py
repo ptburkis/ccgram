@@ -69,6 +69,8 @@ def _normalize_status(raw_status: str | None) -> str:
         return "completed"
     if normalized in ("in_progress", "in-progress", "active"):
         return "in_progress"
+    if normalized in ("deleted", "removed", "cancelled", "canceled"):
+        return "deleted"
     return "pending"
 
 
@@ -376,6 +378,15 @@ class ClaudeTaskStateStore:
         if existing is None:
             return False
 
+        # Handle deletion: drop the task from state entirely. Claude Code's
+        # TaskUpdate supports status="deleted" (and synonyms) to retire a task.
+        # Without this branch the deleted task would be re-normalised to
+        # "pending" and linger in the snapshot forever.
+        raw_status = input_data.get("status")
+        if isinstance(raw_status, str) and _normalize_status(raw_status) == "deleted":
+            del state.tasks[task_id]
+            return True
+
         blocked_by = list(existing.blocked_by)
         for value in input_data.get("addBlockedBy", []):
             blocked = str(value).strip()
@@ -385,7 +396,6 @@ class ClaudeTaskStateStore:
         if remove:
             blocked_by = [value for value in blocked_by if value not in remove]
 
-        raw_status = input_data.get("status")
         updated = ClaudeTaskItem(
             task_id=existing.task_id,
             subject=_as_text(input_data.get("subject")) or existing.subject,
