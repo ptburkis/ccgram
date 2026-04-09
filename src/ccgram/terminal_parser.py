@@ -114,31 +114,35 @@ UI_PATTERNS: list[UIPattern] = [
             re.compile(r"^\s*Esc to exit"),
         ),
     ),
-    # ── Structural catch-all (MUST be last — catches anything above) ─
+    # ── Structural catch-all for numbered-option menus ──────────────
     # Ink's SelectInput renders ❯ (U+276F) as the selection cursor for
-    # the highlighted option.  Combined with a bottom action hint OR a
-    # non-selected list item, this catches ANY selection UI.
-    # context_above=10 pulls in the question/description text above the
-    # cursor.  min_gap=1 for compact prompts.
+    # the highlighted option in /remote-control-style menus where the
+    # cursor is on option 1 and other options are listed below.
     #
-    # Important: only ❯ (U+276F) is allowed as the top cursor. The visually
-    # similar ›  (U+203A, single right-pointing angle quote) MUST NOT be in
-    # this set — Claude Code uses › as the prefix for quoted user messages
-    # in its conversation render (e.g. "› Sorry, can you …"). Including ›
-    # caused false positives where any prose response containing a quoted
-    # user message followed by a numbered list (very common!) was mistaken
-    # for an interactive selection UI, truncating the agent's reply and
-    # rendering phantom Esc/arrow keyboards in Telegram.
+    # CRITICAL: the top anchor must require ❯ to be IMMEDIATELY followed
+    # by a numbered item on the same line (e.g. "❯ 1. allow this command").
+    # Claude Code also uses ❯ as the prefix for rendered user-message
+    # bubbles in the conversation history — e.g. "❯ What do you think we
+    # should do next?". Matching ❯ followed by arbitrary text produces
+    # catastrophic false positives: any assistant reply that includes a
+    # numbered list below a rendered user quote gets detected as a
+    # selection UI and truncated at the first numbered item, with phantom
+    # Esc/arrow keyboards shown in Telegram.
+    #
+    # By requiring ❯ + digit + dot + space in a single line, we only match
+    # actual /remote-control-style menus where the cursor sits on option 1.
+    # Selection UIs with action-hint footers are still caught by the
+    # bottom-up fallback in _try_extract_bottom_up().
     UIPattern(
         name="SelectionUI",
-        top=(re.compile(r"^\s*❯\s"),),
+        top=(re.compile(r"^\s*❯\s+\d+\.\s"),),
         bottom=(
             re.compile(r"^\s*Esc to (cancel|exit)"),
             re.compile(r"^\s*Enter to (select|confirm|continue)"),
             re.compile(r"^\s*ctrl-g to edit"),
             re.compile(r"(?i)^\s*Press enter to (confirm|select|continue|submit)"),
             re.compile(r"(?i)^\s*enter to (submit|confirm|select)"),
-            # Non-selected list items (e.g. /remote-control has no footer)
+            # Next numbered option (e.g. /remote-control has no footer)
             re.compile(r"^\s+\d+\.\s"),
         ),
         min_gap=1,
