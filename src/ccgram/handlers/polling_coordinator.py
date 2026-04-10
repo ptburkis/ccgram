@@ -106,13 +106,19 @@ _bg_work_changed_at: dict[str, float] = {}
 _bg_work_detected: dict[str, bool] = {}
 
 
+_RE_ANSI_STRIP = _re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
 def _parse_bg_work_counts(pane_text: str) -> tuple[int, int]:
     """Extract (agent_count, task_count) from a Claude Code status bar.
 
     Scans only the last 5 lines of the pane (the status bar area).
+    Strips ANSI escape sequences first — Claude Code's status bar wraps
+    each word in its own color code, which would break whitespace-based
+    regex matching.
     Returns (0, 0) if neither pattern is found.
     """
-    tail = "\n".join(pane_text.split("\n")[-5:])
+    tail = _RE_ANSI_STRIP.sub("", "\n".join(pane_text.split("\n")[-5:]))
     agent_match = _RE_LOCAL_AGENTS.search(tail)
     agents = int(agent_match.group(1)) if agent_match else 0
     task_match = _RE_BG_TASKS.search(tail) or _RE_TASKS_SIMPLE.search(tail)
