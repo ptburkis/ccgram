@@ -413,7 +413,10 @@ STATUS_SPINNERS = frozenset(["·", "✻", "✽", "✶", "✳", "✢"])
 # Box-drawing range U+2500–U+257F and other known non-spinner symbols
 _BRAILLE_START = 0x2800
 _BRAILLE_END = 0x28FF
-_NON_SPINNER_RANGES = ((0x2500, 0x257F),)  # box-drawing characters
+_NON_SPINNER_RANGES = (
+    (0x2500, 0x257F),  # box-drawing characters
+    (0x2580, 0x259F),  # block elements (includes Claude Code logo chars ▘▝▜▛▟▙)
+)
 _NON_SPINNER_CHARS = frozenset("─│┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬>|+<=~")
 
 # Unicode categories that spinner characters typically belong to.
@@ -424,6 +427,13 @@ _NON_SPINNER_CHARS = frozenset("─│┌┐└┘├┤┬┴┼═║╔╗╚
 _SPINNER_CATEGORIES = frozenset({"So", "Sm"})
 _MAX_STATUS_PROGRESS_LINES = 8
 _STATUS_PROGRESS_RE = re.compile(r"^\s*(?:⎿\s*)?[✔◼◻◔]\s+\S")
+
+# Completion-time indicators: "✻ Cooked for 31s", "✻ Churned for 1m 43s", etc.
+# These appear AFTER a turn finishes and are past-tense — NOT active status.
+# The spinner character (✻) would otherwise pass is_likely_spinner().
+_COMPLETION_TIME_RE = re.compile(
+    r"^\s*\S\s+\w+(?:ed|ated)\s+for\s+\d+", re.IGNORECASE
+)
 
 
 def is_likely_spinner(char: str) -> bool:
@@ -547,6 +557,11 @@ def _find_status_line_index(lines: list[str], scan_start: int) -> int | None:
             if not candidate:
                 continue
             if is_likely_spinner(candidate[0]):
+                # Reject completion-time indicators ("✻ Cooked for 31s",
+                # "✻ Churned for 1m 43s") — these are past-tense markers
+                # that appear after a turn finishes, not active spinners.
+                if _COMPLETION_TIME_RE.match(candidate):
+                    break
                 return j
             break
     return None
