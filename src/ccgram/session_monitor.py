@@ -1011,7 +1011,14 @@ class SessionMonitor:
                     d = json.loads(first)
                 except (OSError, json.JSONDecodeError):
                     continue
-                if d.get("type") not in ("user", "assistant", "summary", "system"):
+                # Sanity check: the first line must be a recognisable Claude
+                # transcript entry. Claude Code writes various metadata types
+                # as the first line: "permission-mode", "summary", "user",
+                # "assistant", "system", etc. Accept anything that has a
+                # "type" key (proof it's structured Claude output, not a
+                # random file). Reject files where the first line doesn't
+                # parse or lacks a type field.
+                if not d.get("type"):
                     continue
                 chosen = j
                 # Claude uses filename = session_id convention
