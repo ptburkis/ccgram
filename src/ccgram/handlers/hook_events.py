@@ -428,12 +428,16 @@ async def _handle_task_completed(event: HookEvent, bot: Bot) -> None:
 # (e.g. during a long subagent run, or while a Bash call is in flight).
 # These reset the activity timestamp so the typing indicator keeps firing
 # and /busy reports the session as working.
+# NOTE: "Notification" is deliberately EXCLUDED. Claude Code fires a
+# Notification with empty tool_name ~60s after every Stop event as a
+# housekeeping signal. Including it here would make every window look
+# "recently active" permanently, causing the typing indicator to fire
+# on ALL topics even when they're idle.
 _BUSY_HOOK_EVENTS: frozenset[str] = frozenset({
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
     "SubagentStart",
-    "Notification",
     "PermissionRequest",
 })
 
