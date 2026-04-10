@@ -74,6 +74,128 @@ _BACKOFF_MAX = 30.0
 _LoopError = (TelegramError, OSError, RuntimeError, ValueError)
 
 
+# ── Background-work topic indicator ─────────────────────────────────────
+#
+# Parses Claude Code's status bar for "N local agent(s)" / "N task(s)"
+# counts and renames the Telegram topic with a ⚡ suffix when background
+# work is active (option C: one rename on transition, not on count change).
+#
+# Topic name transitions:
+#   idle → busy:  "bulugo-dev"  →  "bulugo-dev ⚡"
+#   busy → idle:  "bulugo-dev ⚡"  →  "bulugo-dev"
+#
+# Debounced at _BG_WORK_DEBOUNCE_SECS so rapid start/stop doesn't flicker.
+
+import re as _re
+
+_RE_LOCAL_AGENTS = _re.compile(r"(\d+)\s+local\s+agents?", _re.IGNORECASE)
+_RE_BG_TASKS = _re.compile(
+    r"(\d+)\s+(?:background\s+)?tasks?\s+(?:running|active|pending)", _re.IGNORECASE
+)
+# Broader fallback: just "N task(s)" in the status bar area
+_RE_TASKS_SIMPLE = _re.compile(r"(\d+)\s+tasks?(?:\s|$)", _re.IGNORECASE)
+
+_BG_WORK_SUFFIX = " \u26a1"  # ⚡
+_BG_WORK_DEBOUNCE_SECS = 5.0
+
+# Per-window state: is background work currently reflected in the topic name?
+_bg_work_shown: dict[str, bool] = {}  # window_id -> True if suffix is on
+# Per-window: when did the detected state last change? (monotonic)
+_bg_work_changed_at: dict[str, float] = {}
+# Per-window: what state was last detected? (True = has work)
+_bg_work_detected: dict[str, bool] = {}
+
+
+def _parse_bg_work_counts(pane_text: str) -> tuple[int, int]:
+    """Extract (agent_count, task_count) from a Claude Code status bar.
+
+    Scans only the last 5 lines of the pane (the status bar area).
+    Returns (0, 0) if neither pattern is found.
+    """
+    tail = "\n".join(pane_text.split("\n")[-5:])
+    agent_match = _RE_LOCAL_AGENTS.search(tail)
+    agents = int(agent_match.group(1)) if agent_match else 0
+    task_match = _RE_BG_TASKS.search(tail) or _RE_TASKS_SIMPLE.search(tail)
+    tasks = int(task_match.group(1)) if task_match else 0
+    return agents, tasks
+
+
+def _strip_bg_suffix(name: str) -> str:
+    """Remove ⚡ suffix from a topic name."""
+    return name.rstrip().removesuffix(_BG_WORK_SUFFIX.strip()).rstrip()
+
+
+async def _check_background_work(
+    bot: Bot,
+    window_id: str,
+    thread_id: int | None,
+    pane_text: str,
+) -> None:
+    """Check for background agent/task counts and update topic name if needed.
+
+    Called from update_status_message on every poll cycle. Uses debouncing
+    to avoid rapid renames.
+    """
+    if thread_id is None:
+        return
+
+    agents, tasks = _parse_bg_work_counts(pane_text)
+    has_work = agents > 0 or tasks > 0
+
+    now = time.monotonic()
+    prev_detected = _bg_work_detected.get(window_id)
+
+    if prev_detected is None or prev_detected != has_work:
+        # State changed — start the debounce timer
+        _bg_work_detected[window_id] = has_work
+        _bg_work_changed_at[window_id] = now
+        return  # wait for debounce
+
+    # State stable — check if debounce period has elapsed
+    changed_at = _bg_work_changed_at.get(window_id, now)
+    if (now - changed_at) < _BG_WORK_DEBOUNCE_SECS:
+        return  # still debouncing
+
+    currently_shown = _bg_work_shown.get(window_id, False)
+    if has_work == currently_shown:
+        return  # already reflected in topic name — no-op
+
+    # Time to rename
+    chat_id = thread_router.resolve_chat_id(
+        next(
+            (uid for uid, tid, wid in thread_router.iter_thread_bindings() if wid == window_id),
+            0,
+        ),
+        thread_id,
+    )
+    if not chat_id:
+        return
+
+    display = thread_router.get_display_name(window_id) or ""
+    clean_name = _strip_bg_suffix(display)
+
+    if has_work:
+        new_name = f"{clean_name}{_BG_WORK_SUFFIX}"
+    else:
+        new_name = clean_name
+
+    try:
+        await bot.edit_forum_topic(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            name=new_name,
+        )
+        _bg_work_shown[window_id] = has_work
+        session_manager.set_display_name(window_id, new_name)
+        logger.debug(
+            "Background work indicator: %s -> %r",
+            window_id,
+            new_name,
+        )
+    except TelegramError:
+        pass  # non-critical, silently degrade
+
+
 # ── Typing throttle ─────────────────────────────────────────────────────
 
 
@@ -425,6 +547,12 @@ async def update_status_message(
         return
 
     pane_text = await tmux_manager.capture_pane(w.window_id, with_ansi=True)
+
+    # Check for background agent/task counts and update topic ⚡ suffix.
+    try:
+        await _check_background_work(bot, window_id, thread_id, pane_text or "")
+    except Exception:
+        pass  # non-critical — never let this break the main poll
     if not pane_text:
         return
 
