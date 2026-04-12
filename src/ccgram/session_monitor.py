@@ -956,7 +956,15 @@ class SessionMonitor:
         if canonical.startswith("web-"):
             canonical = "ccgram"
         prefix = f"{canonical}:"
-        missing: list[str] = [w for w in bound_ids if f"{prefix}{w}" not in sm]
+        # Find missing entries AND stale entries (transcript file gone)
+        missing: list[str] = []
+        for wid in bound_ids:
+            key = f"{prefix}{wid}"
+            if key not in sm:
+                missing.append(wid)
+            elif not Path(sm[key].get("transcript_path", "")).exists():
+                del sm[key]  # stale — transcript gone, treat as missing
+                missing.append(wid)
         if not missing:
             return
 
