@@ -795,6 +795,17 @@ class SessionMonitor:
         current_map = await self._load_current_session_map()
         active_session_ids = {v["session_id"] for v in current_map.values()}
 
+        # If session_map is empty (wrong tmux session name, file not yet
+        # populated, etc.), don't wipe everything — that's destructive and
+        # wrong.  The monitor will pick up sessions as hooks fire.
+        if not active_session_ids and self.state.tracked_sessions:
+            logger.warning(
+                "[Startup cleanup] session_map is empty but %d sessions tracked "
+                "— skipping cleanup (likely wrong tmux session prefix or cold start)",
+                len(self.state.tracked_sessions),
+            )
+            return
+
         stale_sessions = []
         for session_id in self.state.tracked_sessions:
             if session_id not in active_session_ids:
