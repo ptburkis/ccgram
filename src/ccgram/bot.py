@@ -1028,6 +1028,45 @@ async def dashboard_command(
     )
 
 
+async def files_command(
+    update: Update, _context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Return a tappable URL to the file browser for this topic's project directory."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id) or not update.message:
+        return
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        await safe_reply(update.message, "\u274c Use this command inside a topic.")
+        return
+    window_id = thread_router.get_window_for_thread(user.id, thread_id)
+    if not window_id:
+        await safe_reply(
+            update.message, "\u274c This topic is not bound to any session."
+        )
+        return
+    # Get the cwd from window state or tmux
+    state = session_manager.get_window_state(window_id)
+    cwd = state.cwd if state and state.cwd else ""
+    if not cwd:
+        all_windows = await tmux_manager.list_windows()
+        window = next((w for w in all_windows if w.window_id == window_id), None)
+        cwd = window.cwd if window else ""
+    if not cwd:
+        await safe_reply(update.message, "\u274c Could not determine project directory.")
+        return
+    # Build relative path from ~/projects/
+    from pathlib import Path
+    projects_root = Path.home() / "projects"
+    try:
+        rel = Path(cwd).relative_to(projects_root)
+        url = f"{_CCGRAM_WEB_BASE}/files/{rel}/"
+    except ValueError:
+        url = f"{_CCGRAM_WEB_BASE}/files/"
+    await safe_reply(update.message, f"\U0001f4c1 Files: {url}")
+
+
+
 async def cwd_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the working directory of the current topic's session."""
     user = update.effective_user
@@ -1217,6 +1256,9 @@ def create_bot() -> Application:
     )
     application.add_handler(
         CommandHandler("dashboard", dashboard_command, filters=_group_filter)
+    )
+    application.add_handler(
+        CommandHandler("files", files_command, filters=_group_filter)
     )
     application.add_handler(
         CommandHandler("cwd", cwd_command, filters=_group_filter)

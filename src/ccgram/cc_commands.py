@@ -63,6 +63,7 @@ _BOT_COMMANDS: list[tuple[str, str]] = [
     ("upgrade", "Upgrade ccgram and restart"),
     ("terminal", "Web terminal URL for this topic"),
     ("dashboard", "Claude Hub dashboard URL"),
+    ("files", "File browser for this project"),
     ("cwd", "Working directory of this session"),
     ("busy", "Is this session processing right now?"),
     ("fleet", "One-line status of all bound sessions"),
