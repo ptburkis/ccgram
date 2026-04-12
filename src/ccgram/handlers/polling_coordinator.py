@@ -639,12 +639,52 @@ async def update_status_message(
         )
 
 
+
+# ── Startup cleanup ──────────────────────────────────────────────────────
+
+
+async def _clear_stale_bg_indicators(bot: Bot) -> None:
+    """Strip stale ⚡ suffixes from topic names left over from a previous run.
+
+    On restart _bg_work_shown resets to {}, so any topic that still carries
+    the suffix from a previous session would never be cleaned up.  We iterate
+    all bound threads once at startup, detect the suffix, and rename eagerly.
+    """
+    for user_id, thread_id, window_id in list(thread_router.iter_thread_bindings()):
+        display = thread_router.get_display_name(window_id) or ""
+        if not display.endswith(_BG_WORK_SUFFIX):
+            continue
+        clean_name = _strip_bg_suffix(display)
+        chat_id = thread_router.resolve_chat_id(user_id, thread_id)
+        if not chat_id:
+            continue
+        try:
+            await bot.edit_forum_topic(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                name=clean_name,
+            )
+            session_manager.set_display_name(window_id, clean_name)
+            logger.info(
+                "Cleared stale bg-work indicator for %s: %r -> %r",
+                window_id,
+                display,
+                clean_name,
+            )
+        except TelegramError as exc:
+            logger.warning(
+                "Could not clear stale bg-work indicator for %s: %s",
+                window_id,
+                exc,
+            )
+
 # ── Main loop ─────────────────────────────────────────────────────────────
 
 
 async def status_poll_loop(bot: Bot) -> None:
     """Background task to poll terminal status for all thread-bound windows."""
     logger.info("Status polling started (interval: %ss)", STATUS_POLL_INTERVAL)
+    await _clear_stale_bg_indicators(bot)
     timers = {"topic_check": 0.0, "broker": 0.0, "sweep": 0.0}
     _error_streak = 0
     while True:
