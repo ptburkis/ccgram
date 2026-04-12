@@ -69,6 +69,15 @@ async def _handle_notification(event: HookEvent, bot: Bot) -> None:
         tool_name,
         event.window_key,
     )
+    if not tool_name:
+        # Empty tool_name = housekeeping notification, not a real interactive
+        # prompt. Skip in summary mode to avoid phantom UI captures.
+        all_summary = all(
+            session_manager.get_notification_mode(wid) != "all"
+            for _, _, wid in users
+        )
+        if all_summary:
+            return
     wait_header = classify_wait_message(event.data.get("message", ""))
 
     for user_id, thread_id, window_id in users:

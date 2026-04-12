@@ -720,6 +720,11 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         if msg.content_type == "text" and (msg.text or "").strip() == "HEARTBEAT_OK":
             continue
 
+        # Don't echo user messages back in summary mode — the user already
+        # sees their own message in Telegram. The 👤 echo is redundant noise.
+        if notif_mode == "summary" and msg.role == "user":
+            continue
+
         # Handle interactive tools specially - capture terminal and send UI
         if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":
             # Mark interactive mode BEFORE sleeping so polling skips this window
