@@ -110,6 +110,18 @@ def _is_transcript_claimed(transcript_path: str, excluding_window_id: str) -> bo
     return False
 
 
+def _revoke_transcript_claim(transcript_path: str, new_owner_id: str) -> None:
+    """Revoke another window's CWD-based claim on a transcript (PTY override)."""
+    for wid, ws in session_manager.window_states.items():
+        if wid == new_owner_id:
+            continue
+        if ws.transcript_path == transcript_path:
+            logger.info("PTY override: revoking %s claim, reassigning to %s", wid, new_owner_id)
+            ws.transcript_path = ""
+            ws.session_id = ""
+            break
+
+
 async def _find_and_register_transcript(
     window_id: str,
     state: "WindowState",
@@ -139,12 +151,15 @@ async def _find_and_register_transcript(
         # Skip transcripts already claimed by another window to prevent
         # bleed when multiple windows share the same cwd.
         if _is_transcript_claimed(event.transcript_path, window_id):
-            logger.debug(
-                "Transcript %s already claimed by another window, skipping",
-                event.transcript_path,
-                window_id=window_id,
-            )
-            continue
+            if event.pty_resolved:
+                _revoke_transcript_claim(event.transcript_path, window_id)
+            else:
+                logger.debug(
+                    "Transcript %s already claimed by another window, skipping",
+                    event.transcript_path,
+                    window_id=window_id,
+                )
+                continue
 
         if (
             state.session_id == event.session_id

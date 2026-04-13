@@ -984,6 +984,12 @@ class SessionMonitor:
                 # Stale binding — window doesn't exist. Leave alone; other
                 # cleanup paths handle zombie bindings.
                 continue
+            # Only reconcile Claude (hook-based) windows — hookless providers
+            # (codex, gemini) have their own transcript discovery.
+            from .session import session_manager as _sm2
+            ws = _sm2.window_states.get(wid)
+            if ws and ws.provider_name and ws.provider_name != "claude":
+                continue
             cwd = w.cwd or ""
             if not cwd:
                 continue

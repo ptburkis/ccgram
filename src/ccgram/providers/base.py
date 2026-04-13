@@ -51,6 +51,7 @@ class SessionStartEvent:
     cwd: str  # absolute path to the project directory
     transcript_path: str  # path to the session's transcript file
     window_key: str  # tmux key, e.g. "ccgram:@0"
+    pty_resolved: bool = False  # True when PTY strategy identified this transcript
 
 
 @dataclass(frozen=True, slots=True)

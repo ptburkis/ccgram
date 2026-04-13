@@ -813,6 +813,7 @@ class CodexProvider(JsonlProvider):
                             cwd=file_cwd,
                             transcript_path=str(jsonl_path),
                             window_key=window_key,
+                            pty_resolved=True,
                         )
 
         # Strategy 2: cwd-based fallback (legacy behavior).
