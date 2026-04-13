@@ -70,7 +70,11 @@ async def handle_spawn_approval(
         logger.warning("Spawn request %s denied: max windows reached", request_id)
         return None
 
-    launch_command = resolve_launch_command(req.provider)
+    from ..window_state_store import DEFAULT_APPROVAL_MODE
+
+    launch_command = resolve_launch_command(
+        req.provider, approval_mode=DEFAULT_APPROVAL_MODE
+    )
 
     success, message, window_name, window_id = await tmux_manager.create_window(
         req.cwd,

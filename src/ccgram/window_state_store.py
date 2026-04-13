@@ -11,6 +11,7 @@ Key types: WindowState, APPROVAL_MODES, BATCH_MODES, NOTIFICATION_MODES.
 
 from __future__ import annotations
 
+import os
 import structlog
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ from typing import Any, Self
 logger = structlog.get_logger()
 
 APPROVAL_MODES: frozenset[str] = frozenset({"normal", "yolo"})
-DEFAULT_APPROVAL_MODE = "normal"
+DEFAULT_APPROVAL_MODE = os.environ.get("CCGRAM_DEFAULT_APPROVAL_MODE", "yolo")
 YOLO_APPROVAL_MODE = "yolo"
 
 BATCH_MODES: frozenset[str] = frozenset({"batched", "verbose"})

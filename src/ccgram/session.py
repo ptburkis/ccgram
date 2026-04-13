@@ -808,6 +808,45 @@ class SessionManager:
             if self._sync_window_from_session_map(window_id, info):
                 changed = True
 
+        # De-duplicate transcripts at startup for hookless providers only.
+        # Hookless providers (Codex, Gemini) each get their own transcript per
+        # process, so sharing is always a mis-discovery.  Hook-based providers
+        # (Claude) legitimately share one session per cwd.
+        _HOOKLESS_PROVIDERS = frozenset({"codex", "gemini"})
+        seen_transcripts: dict[str, str] = {}
+        deduped_wids: set[str] = set()
+        for wid, ws in self.window_states.items():
+            if not ws.transcript_path:
+                continue
+            if ws.provider_name not in _HOOKLESS_PROVIDERS:
+                continue
+            if ws.transcript_path in seen_transcripts:
+                logger.info(
+                    "Clearing duplicate transcript on window %s (already claimed by %s): %s",
+                    wid,
+                    seen_transcripts[ws.transcript_path],
+                    ws.transcript_path,
+                )
+                ws.transcript_path = ""
+                ws.session_id = ""
+                deduped_wids.add(wid)
+                changed = True
+            else:
+                seen_transcripts[ws.transcript_path] = wid
+
+        # Persist de-dup clearances back to session_map so cleared windows
+        # aren't re-imported as duplicates on the next poll cycle.
+        map_changed = False
+        for wid in deduped_wids:
+            ws = self.window_states[wid]
+            entry = session_map.get(prefix + wid, {})
+            if entry.get("transcript_path"):
+                entry["transcript_path"] = ""
+                entry["session_id"] = ""
+                map_changed = True
+        if map_changed:
+            atomic_write_json(config.session_map_file, session_map)
+
         # Clean up window_states entries not in current session_map.
         # Protect entries whose session_id is still referenced by old-format
         # keys — those sessions are valid but haven't re-triggered the hook yet.

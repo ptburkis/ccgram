@@ -96,6 +96,20 @@ def _resolve_providers_to_try(
     ]
 
 
+def _is_transcript_claimed(transcript_path: str, excluding_window_id: str) -> bool:
+    """Return True if another window already owns this transcript.
+
+    Prevents multiple windows sharing the same cwd from all claiming
+    the same transcript file (which causes output bleed across topics).
+    """
+    for wid, ws in session_manager.window_states.items():
+        if wid == excluding_window_id:
+            continue
+        if ws.transcript_path and ws.transcript_path == transcript_path:
+            return True
+    return False
+
+
 async def _find_and_register_transcript(
     window_id: str,
     state: "WindowState",
@@ -120,6 +134,16 @@ async def _find_and_register_transcript(
             pane_tty=pane_tty,
         )
         if not event:
+            continue
+
+        # Skip transcripts already claimed by another window to prevent
+        # bleed when multiple windows share the same cwd.
+        if _is_transcript_claimed(event.transcript_path, window_id):
+            logger.debug(
+                "Transcript %s already claimed by another window, skipping",
+                event.transcript_path,
+                window_id=window_id,
+            )
             continue
 
         if (
