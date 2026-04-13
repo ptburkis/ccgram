@@ -67,6 +67,7 @@ _BOT_COMMANDS: list[tuple[str, str]] = [
     ("cwd", "Working directory of this session"),
     ("busy", "Is this session processing right now?"),
     ("fleet", "One-line status of all bound sessions"),
+    ("usage", "Claude + Codex usage limits and pace"),
 ]
 
 # Telegram limits: max 100 commands, descriptions max 256 chars

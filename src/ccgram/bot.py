@@ -1197,6 +1197,85 @@ async def fleet_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> 
     await safe_reply(update.message, body)
 
 
+async def usage_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show Claude + Codex usage limits."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id) or not update.message:
+        return
+
+    import subprocess as _sp
+    try:
+        result = _sp.run(
+            ["/home/peter/ccgram-dashboard/scrape-usage.sh", "james", "bulugo_lead_gen"],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            await safe_reply(update.message, "⚠️ Could not fetch usage data.")
+            return
+
+        import json as _json
+        data = _json.loads(result.stdout.strip())
+    except Exception as e:
+        await safe_reply(update.message, f"⚠️ Usage scrape failed: {e}")
+        return
+
+    from datetime import datetime, timedelta, timezone
+
+    # Calculate weekly pace (Thursday 11:00 UTC reset)
+    now = datetime.now(timezone.utc)
+    days_since = (now.weekday() - 3) % 7
+    if days_since == 0 and now.hour < 11:
+        days_since = 7
+    last_reset = (now - timedelta(days=days_since)).replace(hour=11, minute=0, second=0, microsecond=0)
+    elapsed = now - last_reset
+    expected_pct = (elapsed / timedelta(days=7)) * 100
+
+    lines = []
+
+    # Session
+    s = data.get("session", {})
+    if s:
+        lines.append(f"⏱ Session: {s['percent']}% · resets {s.get('resets', '?')}")
+
+    # Weekly all models + pace
+    w = data.get("weekAll", {})
+    if w:
+        pct = w["percent"]
+        diff = pct - expected_pct
+        if diff < -2:
+            pace = f"▼ {abs(diff):.0f}% under"
+        elif diff > 2:
+            pace = f"▲ {diff:.0f}% over"
+        else:
+            pace = "≈ on pace"
+        lines.append(f"📊 Weekly: {pct}% · {pace} · resets {w.get('resets', '?')}")
+
+    # Weekly Sonnet
+    ws = data.get("weekSonnet", {})
+    if ws:
+        pct = ws["percent"]
+        diff = pct - expected_pct
+        if diff < -2:
+            pace = f"▼ {abs(diff):.0f}% under"
+        elif diff > 2:
+            pace = f"▲ {diff:.0f}% over"
+        else:
+            pace = "≈ on pace"
+        lines.append(f"🔵 Sonnet: {pct}% · {pace} · resets {ws.get('resets', '?')}")
+
+    # Codex
+    cx = data.get("codex", {})
+    if cx:
+        lines.append(f"🟢 Codex: {cx['percent']}% used · {cx.get('remaining', '?')}% left")
+
+    if not lines:
+        await safe_reply(update.message, "⚠️ No usage data available.")
+        return
+
+    await safe_reply(update.message, "\n".join(lines))
+
+
+
 def create_bot() -> Application:
     # Suppress PTBUserWarning about JobQueue (we intentionally don't use it for core tasks)
     import warnings
@@ -1273,6 +1352,9 @@ def create_bot() -> Application:
     )
     application.add_handler(
         CommandHandler("fleet", fleet_command, filters=_group_filter)
+    )
+    application.add_handler(
+        CommandHandler("usage", usage_command, filters=_group_filter)
     )
     _load_callback_handlers()
     application.add_handler(CallbackQueryHandler(_dispatch_callback))
