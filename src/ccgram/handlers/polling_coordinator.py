@@ -97,6 +97,7 @@ _RE_TASKS_SIMPLE = _re.compile(r"(\d+)\s+tasks?(?:\s|$)", _re.IGNORECASE)
 
 _BG_WORK_SUFFIX = " \u26a1"  # ⚡
 _BG_WORK_DEBOUNCE_SECS = 5.0
+_BG_WORK_STATE_FILE = Path.home() / ".ccgram" / "bg_work_shown.json"
 
 # Per-window state: is background work currently reflected in the topic name?
 _bg_work_shown: dict[str, bool] = {}  # window_id -> True if suffix is on
@@ -104,6 +105,24 @@ _bg_work_shown: dict[str, bool] = {}  # window_id -> True if suffix is on
 _bg_work_changed_at: dict[str, float] = {}
 # Per-window: what state was last detected? (True = has work)
 _bg_work_detected: dict[str, bool] = {}
+
+
+def _save_bg_work_state() -> None:
+    try:
+        import json
+        _BG_WORK_STATE_FILE.write_text(json.dumps(_bg_work_shown))
+    except OSError:
+        pass
+
+
+def _load_bg_work_state() -> None:
+    global _bg_work_shown
+    try:
+        import json
+        if _BG_WORK_STATE_FILE.exists():
+            _bg_work_shown = json.loads(_BG_WORK_STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        pass
 
 
 _RE_ANSI_STRIP = _re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -192,6 +211,7 @@ async def _check_background_work(
             name=new_name,
         )
         _bg_work_shown[window_id] = has_work
+        _save_bg_work_state()
         session_manager.set_display_name(window_id, new_name)
         logger.debug(
             "Background work indicator: %s -> %r",
@@ -647,13 +667,15 @@ async def _clear_stale_bg_indicators(bot: Bot) -> None:
     """Strip stale ⚡ suffixes from topic names left over from a previous run.
 
     On restart _bg_work_shown resets to {}, so any topic that still carries
-    the suffix from a previous session would never be cleaned up.  We iterate
-    all bound threads once at startup, detect the suffix, and rename eagerly.
+    the suffix from a previous session would never be cleaned up.  We load
+    the persisted state, then iterate all window_ids where it was True and
+    rename eagerly.
     """
+    _load_bg_work_state()
     for user_id, thread_id, window_id in list(thread_router.iter_thread_bindings()):
-        display = thread_router.get_display_name(window_id) or ""
-        if not display.endswith(_BG_WORK_SUFFIX):
+        if not _bg_work_shown.get(window_id, False):
             continue
+        display = thread_router.get_display_name(window_id) or ""
         clean_name = _strip_bg_suffix(display)
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
         if not chat_id:
@@ -677,6 +699,8 @@ async def _clear_stale_bg_indicators(bot: Bot) -> None:
                 window_id,
                 exc,
             )
+    _bg_work_shown.update({k: False for k in _bg_work_shown})
+    _save_bg_work_state()
 
 # ── Main loop ─────────────────────────────────────────────────────────────
 
