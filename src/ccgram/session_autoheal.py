@@ -49,15 +49,47 @@ def _cwd_to_project_slug(cwd: str) -> str:
     return "-" + cwd.lstrip("/").replace("/", "-").replace("_", "-")
 
 
+_MAX_JSONL_READ_BYTES = 50 * 1024 * 1024  # 50 MB cap
+
+
+def _jsonl_belongs_to_window(path: Path, window_id: str, window_name: str) -> bool:
+    """Return True if path contains the hook marker for this window.
+
+    The marker written by the SessionStart hook looks like:
+        tmux key=ccgram:<wid>, window_name=<wname>, session_id=<stem>
+
+    where <stem> is the jsonl filename without extension (== session UUID).
+    Reading as bytes and using `in` is safe and avoids line-parsing overhead.
+    We cap at 50 MB to avoid OOM on runaway transcripts.
+    """
+    try:
+        stem = path.stem
+        marker = (
+            f"tmux key=ccgram:{window_id}, window_name={window_name}, session_id={stem}"
+        ).encode()
+        with open(path, "rb") as fh:
+            content = fh.read(_MAX_JSONL_READ_BYTES)
+        return marker in content
+    except OSError:
+        return False
+
+
 def _find_newer_jsonl_sync(
     project_dir: Path,
     current_transcript: str,
     current_sid: str,
+    window_id: str,
+    window_name: str,
 ) -> tuple[str, str] | None:
-    """Scan project_dir for a JSONL newer than the currently-tracked one.
+    """Scan project_dir for a JSONL newer than the currently-tracked one that
+    belongs to this specific window (identified by the hook marker).
 
     Returns (new_session_id, new_transcript_path) if a newer candidate is
-    found, or None if nothing beats the current entry.
+    found, or None if nothing qualifies.
+
+    If NO jsonl contains the hook marker for this window we return None rather
+    than falling back to mtime-only — better to skip the heal than assign the
+    wrong session when multiple windows share the same cwd.
 
     This runs synchronously — call it via asyncio.to_thread.
     """
@@ -69,23 +101,32 @@ def _find_newer_jsonl_sync(
     if not jsonl_files:
         return None
 
+    # Filter to only files that carry the hook marker for this window.
+    # Skip the currently-tracked session — we already know about it.
+    own_candidates = [
+        jf for jf in jsonl_files
+        if jf.stem != current_sid and _jsonl_belongs_to_window(jf, window_id, window_name)
+    ]
+
+    if not own_candidates:
+        # No jsonl contains the hook marker for this window — could be a brand
+        # new session with no hook events yet, or a shared-cwd sibling.  Don't
+        # guess; returning None skips the heal safely.
+        return None
+
     # Get mtime of the current transcript (if it exists) for comparison.
     current_mtime: float = 0.0
     if current_transcript:
         try:
             current_mtime = Path(current_transcript).stat().st_mtime
         except OSError:
-            # File doesn't exist — any existing JSONL is a candidate.
+            # File doesn't exist — any existing candidate qualifies.
             current_mtime = 0.0
 
     best_path: Path | None = None
     best_mtime: float = current_mtime  # must beat this to qualify
 
-    for jf in jsonl_files:
-        sid = jf.stem
-        # Skip the currently-tracked session — we already know about it.
-        if sid == current_sid:
-            continue
+    for jf in own_candidates:
         try:
             mtime = jf.stat().st_mtime
         except OSError:
@@ -263,11 +304,17 @@ async def _maybe_refresh_session_map_inner(window_id: str) -> bool:
         return False
 
     # Scan for a newer JSONL — do it in a thread to avoid blocking the loop.
+    # Pass window_id and window_name so we only consider jsonls that contain
+    # the hook marker for THIS window (prevents shared-cwd windows stealing
+    # each other's sessions).
+    window_name = getattr(state, "window_name", None) or getattr(state, "name", None) or ""
     result = await asyncio.to_thread(
         _find_newer_jsonl_sync,
         project_dir,
         current_transcript,
         current_sid,
+        window_id,
+        window_name,
     )
 
     if result is None:
