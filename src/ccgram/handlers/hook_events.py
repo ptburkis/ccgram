@@ -200,6 +200,22 @@ async def _handle_stop(event: HookEvent, bot: Bot) -> None:
             )
 
 
+# ── Subagent topic-name suffix (⚡) ───────────────────────────────────────
+# ⚡ = inline subagent (Task tool) running.  🐚 = bg shell task (polling_coordinator.py).
+# Both can coexist: "name 🐚 ⚡". Order: 🐚 first, then ⚡.
+
+_SUBAGENT_SUFFIX = " \u26a1"  # ⚡
+_BG_WORK_SUFFIX_EXT = " \U0001f41a"  # 🐚 — owned by polling_coordinator, stripped here too
+
+
+def _strip_both_suffixes(name: str) -> str:
+    """Strip both 🐚 and ⚡ suffixes to get the clean base name."""
+    result = name.rstrip()
+    for suffix in (_SUBAGENT_SUFFIX.strip(), _BG_WORK_SUFFIX_EXT.strip()):
+        result = result.removesuffix(suffix).rstrip()
+    return result
+
+
 # Track active subagents per window: window_id -> {subagent_id -> name}
 _active_subagents: dict[str, dict[str, str]] = {}
 
@@ -228,6 +244,37 @@ def build_subagent_label(names: list[str]) -> str | None:
 def clear_subagents(window_id: str) -> None:
     """Clear all subagent tracking for a window."""
     _active_subagents.pop(window_id, None)
+
+
+
+async def _apply_subagent_suffix(bot: Bot, users: list, *, add: bool) -> None:
+    """Add/remove ⚡ suffix; preserves 🐚 if present. Order: 🐚 then ⚡."""
+    from telegram.error import TelegramError as _TelegramError
+    for user_id, thread_id, window_id in users:
+        chat_id = thread_router.resolve_chat_id(user_id, thread_id)
+        if not chat_id:
+            continue
+        display = thread_router.get_display_name(window_id) or ""
+        clean = _strip_both_suffixes(display)
+        has_bg = _BG_WORK_SUFFIX_EXT.strip() in display
+        new_name = f"{clean}{_BG_WORK_SUFFIX_EXT}" if has_bg else clean
+        if add:
+            new_name = f"{new_name}{_SUBAGENT_SUFFIX}"
+        if new_name == display:
+            continue
+        try:
+            await bot.edit_forum_topic(
+                chat_id=chat_id, message_thread_id=thread_id, name=new_name,
+            )
+            session_manager.set_display_name(window_id, new_name)
+            logger.debug(
+                "Subagent suffix %s: %s -> %r",
+                "added" if add else "removed",
+                window_id,
+                new_name,
+            )
+        except _TelegramError as e:
+            logger.debug("Failed to edit topic for subagent suffix: %s", e)
 
 
 async def _handle_subagent_start(event: HookEvent, bot: Bot) -> None:
@@ -269,6 +316,9 @@ async def _handle_subagent_start(event: HookEvent, bot: Bot) -> None:
             thread_id=thread_id,
         )
 
+    # Append ⚡ to topic name to indicate inline subagent is running.
+    await _apply_subagent_suffix(bot, users, add=True)
+
 
 async def _handle_subagent_stop(event: HookEvent, bot: Bot) -> None:
     """Handle SubagentStop — remove subagent from tracking and notify."""
@@ -306,6 +356,10 @@ async def _handle_subagent_stop(event: HookEvent, bot: Bot) -> None:
             f"\U0001f916 Subagent done: {name}",
             thread_id=thread_id,
         )
+
+    # Remove ⚡ from topic name when all subagents for this window are done.
+    if not _active_subagents.get(window_id):
+        await _apply_subagent_suffix(bot, users, add=False)
 
 
 async def _handle_teammate_idle(event: HookEvent, bot: Bot) -> None:

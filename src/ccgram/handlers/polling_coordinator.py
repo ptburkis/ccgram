@@ -77,12 +77,16 @@ _LoopError = (TelegramError, OSError, RuntimeError, ValueError)
 # ── Background-work topic indicator ─────────────────────────────────────
 #
 # Parses Claude Code's status bar for "N local agent(s)" / "N task(s)"
-# counts and renames the Telegram topic with a ⚡ suffix when background
-# work is active (option C: one rename on transition, not on count change).
+# counts and renames the Telegram topic with a 🐚 suffix when background
+# shell/task work is active (option C: one rename on transition, not on
+# count change).
 #
 # Topic name transitions:
-#   idle → busy:  "bulugo-dev"  →  "bulugo-dev ⚡"
-#   busy → idle:  "bulugo-dev ⚡"  →  "bulugo-dev"
+#   idle → busy:  "bulugo-dev"  →  "bulugo-dev 🐚"
+#   busy → idle:  "bulugo-dev 🐚"  →  "bulugo-dev"
+#
+# ⚡ is now reserved for inline subagents (Task tool) — see hook_events.py.
+# Both suffixes can coexist: "bulugo-dev 🐚 ⚡"
 #
 # Debounced at _BG_WORK_DEBOUNCE_SECS so rapid start/stop doesn't flicker.
 
@@ -95,7 +99,8 @@ _RE_BG_TASKS = _re.compile(
 # Broader fallback: just "N task(s)" in the status bar area
 _RE_TASKS_SIMPLE = _re.compile(r"(\d+)\s+tasks?(?:\s|$)", _re.IGNORECASE)
 
-_BG_WORK_SUFFIX = " \u26a1"  # ⚡
+_BG_WORK_SUFFIX = " \U0001f41a"  # 🐚
+_SUBAGENT_SUFFIX_EXT = " \u26a1"  # ⚡ — owned by hook_events.py, stripped here too
 _BG_WORK_DEBOUNCE_SECS = 5.0
 _BG_WORK_STATE_FILE = Path.home() / ".ccgram" / "bg_work_shown.json"
 
@@ -146,8 +151,16 @@ def _parse_bg_work_counts(pane_text: str) -> tuple[int, int]:
 
 
 def _strip_bg_suffix(name: str) -> str:
-    """Remove ⚡ suffix from a topic name."""
-    return name.rstrip().removesuffix(_BG_WORK_SUFFIX.strip()).rstrip()
+    """Remove 🐚 and ⚡ suffixes from a topic name.
+
+    Both bg-work (🐚) and subagent (⚡) suffixes may be present simultaneously.
+    This strips both so callers get a clean base name to reattach desired
+    suffixes. Order of removal doesn't matter — we strip iteratively.
+    """
+    result = name.rstrip()
+    for suffix in (_SUBAGENT_SUFFIX_EXT.strip(), _BG_WORK_SUFFIX.strip()):
+        result = result.removesuffix(suffix).rstrip()
+    return result
 
 
 async def _check_background_work(
@@ -199,10 +212,15 @@ async def _check_background_work(
     display = thread_router.get_display_name(window_id) or ""
     clean_name = _strip_bg_suffix(display)
 
+    # Preserve any ⚡ subagent suffix that may already be appended.
+    # Order: 🐚 (bg shell work) first, then ⚡ (inline subagent).
+    has_subagent_suffix = _SUBAGENT_SUFFIX_EXT.strip() in display
     if has_work:
         new_name = f"{clean_name}{_BG_WORK_SUFFIX}"
     else:
         new_name = clean_name
+    if has_subagent_suffix:
+        new_name = f"{new_name}{_SUBAGENT_SUFFIX_EXT}"
 
     try:
         await bot.edit_forum_topic(
@@ -664,7 +682,7 @@ async def update_status_message(
 
 
 async def _clear_stale_bg_indicators(bot: Bot) -> None:
-    """Strip stale ⚡ suffixes from topic names left over from a previous run.
+    """Strip stale 🐚 suffixes from topic names left over from a previous run.
 
     On restart _bg_work_shown resets to {}, so any topic that still carries
     the suffix from a previous session would never be cleaned up.  We load
