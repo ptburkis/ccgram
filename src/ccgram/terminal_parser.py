@@ -487,6 +487,8 @@ def parse_status_line(pane_text: str, *, pane_rows: int | None = None) -> str | 
 
     status_idx = _find_status_line_index(lines, scan_start)
     if status_idx is None:
+        status_idx = _find_status_line_anywhere(lines, scan_start)
+    if status_idx is None:
         return None
     return lines[status_idx].strip()[1:].strip()
 
@@ -500,6 +502,8 @@ def parse_status_block(pane_text: str, *, pane_rows: int | None = None) -> str |
     scan_start = _status_scan_start(lines, pane_rows)
 
     status_idx = _find_status_line_index(lines, scan_start)
+    if status_idx is None:
+        status_idx = _find_status_line_anywhere(lines, scan_start)
     if status_idx is None:
         return None
 
@@ -544,6 +548,15 @@ def _collect_status_progress_lines(
     return progress_lines
 
 
+# Characters that indicate a tasklist context line (checklist items, connectors).
+_TASKLIST_CHARS = frozenset("⎿◼✔◻◔")
+
+# Matches an active Claude status line: spinner + space + capitalized active verb.
+_STATUS_LINE_RE = re.compile(
+    r"^\s*\S\s+[A-Z][a-z]+(?:ing|ling|ating|izing|led|ized)\b"
+)
+
+
 def _find_status_line_index(lines: list[str], scan_start: int) -> int | None:
     """Locate the Claude spinner status line above the footer separators."""
     for i in range(len(lines) - 1, scan_start - 1, -1):
@@ -556,7 +569,12 @@ def _find_status_line_index(lines: list[str], scan_start: int) -> int | None:
             candidate = lines[j].strip()
             if not candidate:
                 continue
-            if is_likely_spinner(candidate[0]):
+            first_char = candidate[0]
+            # Reject tasklist entries (◼ ✔ ◻ ◔ ⎿) — these look like spinners
+            # but are checklist items, not active status lines.
+            if first_char in _TASKLIST_CHARS:
+                break
+            if is_likely_spinner(first_char):
                 # Reject completion-time indicators ("✻ Cooked for 31s",
                 # "✻ Churned for 1m 43s") — these are past-tense markers
                 # that appear after a turn finishes, not active spinners.
@@ -564,6 +582,29 @@ def _find_status_line_index(lines: list[str], scan_start: int) -> int | None:
                     break
                 return j
             break
+    return None
+
+
+def _find_status_line_anywhere(lines: list[str], scan_start: int) -> int | None:
+    """Full-pane scan for status line when separator-anchored scan fails.
+
+    Used when extra UI elements (tasklist, rating survey) sit between the
+    status line and the nearest separator. Walks top-to-bottom, skipping
+    tasklist entries and completion-time indicators.
+    """
+    for i in range(scan_start, len(lines)):
+        stripped = lines[i].strip()
+        if not stripped:
+            continue
+        first_char = stripped[0]
+        if first_char in _TASKLIST_CHARS:
+            continue
+        if not is_likely_spinner(first_char):
+            continue
+        if _COMPLETION_TIME_RE.match(stripped):
+            continue
+        if _STATUS_LINE_RE.match(lines[i]):
+            return i
     return None
 
 
