@@ -256,10 +256,10 @@ async def _handle_subagent_start(event: HookEvent, bot: Bot) -> None:
         name,
     )
 
-    # Skip status updates in summary mode — only prose responses reach the user.
-    if session_manager.get_notification_mode(window_id) != "all":
-        return
-
+    # Post a brief notification in all modes — knowing an agent started
+    # gives the user useful context even in summary mode. The "all" mode
+    # keeps this as a status-style update; summary mode gets a single
+    # informational message per start.
     for user_id, thread_id, _ in users:
         await enqueue_status_update(
             bot,
@@ -295,10 +295,9 @@ async def _handle_subagent_stop(event: HookEvent, bot: Bot) -> None:
         name,
     )
 
-    # Skip status updates in summary mode.
-    if session_manager.get_notification_mode(window_id) != "all":
-        return
-
+    # Post completion notification in all modes — pairs with the start
+    # notification so the user sees a complete start/stop trail for
+    # background agents.
     for user_id, thread_id, _ in users:
         await enqueue_status_update(
             bot,
