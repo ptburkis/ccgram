@@ -22,6 +22,22 @@ from .providers.base import EXPANDABLE_QUOTE_END, EXPANDABLE_QUOTE_START
 # ccgram manages expandable quotes exclusively through sentinel tokens.
 _tm_config.get_runtime_config().cite_expandable = False
 
+# Headings: strip the default emoji prefixes (📌/✏/📚/🔖). Telegram has no
+# native heading concept — telegramify adds emoji prefixes as visual hints,
+# but they add noise. Just let the BOLD/UNDERLINE entities carry the
+# heading visual weight.
+_symbol = _tm_config.get_runtime_config().markdown_symbol
+_symbol.heading_level_1 = ""
+_symbol.heading_level_2 = ""
+_symbol.heading_level_3 = ""
+_symbol.heading_level_4 = ""
+
+# Horizontal rule: telegramify renders `---` as 8 em-dashes "————————".
+# Swap to heavy box-drawing horizontal which reads as a cleaner divider.
+# Same character count (8 → 8) so entity offsets are preserved.
+_HR_FROM = "\u2014" * 8  # em-dash × 8 (U+2014)
+_HR_TO = "\u2501" * 8    # heavy horizontal × 8 (U+2501 ━━━━━━━━)
+
 _EXPQUOTE_RE = re.compile(
     re.escape(EXPANDABLE_QUOTE_START) + r"([\s\S]*?)" + re.escape(EXPANDABLE_QUOTE_END)
 )
@@ -112,6 +128,10 @@ def _convert_segment(text: str) -> tuple[str, list[TelegramEntity]]:
     """Convert a markdown segment (no expandable quote sentinels) to entities."""
     preprocessed = _strip_indented_code_blocks(text)
     plain, lib_entities = _tm_convert(preprocessed)
+    # Swap em-dash HR (telegramify's thematic-break render) for a cleaner
+    # box-drawing line. Same char count = entity offsets unchanged.
+    if _HR_FROM in plain:
+        plain = plain.replace(_HR_FROM, _HR_TO)
     tg_entities = [_lib_entity_to_telegram(e) for e in lib_entities]
     return plain, tg_entities
 
