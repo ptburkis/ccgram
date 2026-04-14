@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import config
+from .transcript_ownership import jsonl_has_hook_marker
 from .utils import atomic_write_json
 
 logger = structlog.get_logger()
@@ -49,29 +50,14 @@ def _cwd_to_project_slug(cwd: str) -> str:
     return "-" + cwd.lstrip("/").replace("/", "-").replace("_", "-")
 
 
-_MAX_JSONL_READ_BYTES = 50 * 1024 * 1024  # 50 MB cap
-
-
 def _jsonl_belongs_to_window(path: Path, window_id: str, window_name: str) -> bool:
     """Return True if path contains the hook marker for this window.
 
-    The marker written by the SessionStart hook looks like:
-        tmux key=ccgram:<wid>, window_name=<wname>, session_id=<stem>
-
-    where <stem> is the jsonl filename without extension (== session UUID).
-    Reading as bytes and using `in` is safe and avoids line-parsing overhead.
-    We cap at 50 MB to avoid OOM on runaway transcripts.
+    Delegates to :func:`transcript_ownership.jsonl_has_hook_marker` which is
+    the single canonical implementation of this check.  Kept here as a thin
+    alias so existing callers inside this module don't need updating.
     """
-    try:
-        stem = path.stem
-        marker = (
-            f"tmux key=ccgram:{window_id}, window_name={window_name}, session_id={stem}"
-        ).encode()
-        with open(path, "rb") as fh:
-            content = fh.read(_MAX_JSONL_READ_BYTES)
-        return marker in content
-    except OSError:
-        return False
+    return jsonl_has_hook_marker(path, window_id, window_name)
 
 
 def _find_newer_jsonl_sync(
@@ -363,5 +349,36 @@ async def _maybe_refresh_session_map_inner(window_id: str) -> bool:
         window_id,
         current_sid or "(none)",
         new_sid,
+    )
+    return True
+
+
+async def apply_session_update(
+    window_id: str,
+    old_sid: str,
+    new_sid: str,
+    new_transcript: str,
+    source: str = "unknown",
+) -> bool:
+    """Atomically update session_map + monitor_state and refresh in-memory state.
+
+    Public entry point for any code path that records a session rotation.
+    Used by auto-heal (inbound path) and inotify session watcher (fs events).
+    Returns True if both file writes succeeded and in-memory state refreshed.
+    """
+    ok = await asyncio.to_thread(
+        _update_session_map_sync, window_id, old_sid, new_sid, new_transcript,
+    )
+    if not ok:
+        return False
+    await asyncio.to_thread(_update_monitor_state_sync, old_sid, new_sid, new_transcript)
+    from .session import session_manager
+    try:
+        await session_manager.load_session_map()
+    except Exception:
+        logger.debug("%s: load_session_map failed for %s", source, window_id, exc_info=True)
+    logger.info(
+        "%s: session update applied for %s: %s -> %s",
+        source, window_id, old_sid or "(none)", new_sid,
     )
     return True

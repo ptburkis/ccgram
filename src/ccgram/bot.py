@@ -907,6 +907,10 @@ async def post_init(application: Application) -> None:
     _status_poll_task.add_done_callback(task_done_callback)
     logger.info("Status polling task started")
 
+    # Start inotify session watcher (event-driven session rotation detection)
+    from .session_watcher import start_session_watcher
+    await start_session_watcher()
+
 
 async def _send_shutdown_notification(application: Application) -> None:
     """Send a shutdown notification to the General topic if a group is configured."""
