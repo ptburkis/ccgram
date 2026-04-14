@@ -250,10 +250,6 @@ async def _maybe_refresh_session_map_inner(window_id: str) -> bool:
     current_sid = state.session_id
     current_transcript = state.transcript_path
 
-    # Fast-path: transcript exists → nothing to heal.
-    if current_transcript and Path(current_transcript).exists():
-        return False
-
     # Compute the Claude project directory for this cwd.
     slug = _cwd_to_project_slug(cwd)
     project_dir = config.claude_projects_path / slug
