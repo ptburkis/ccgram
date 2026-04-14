@@ -269,7 +269,9 @@ def _find_window_for_jsonl(
         marker = (
             f"tmux key=ccgram:{window_id}, window_name={window_name}, session_id={stem}"
         ).encode()
-        if marker in content:
+        # Require >=2 occurrences (real hooks fire multiple times);
+        # single-occurrence is incidental (tool output / prompt literal).
+        if content.count(marker) >= 2:
             current_sid = entry.get("session_id") or None
             return window_id, window_name, current_sid
 

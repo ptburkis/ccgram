@@ -42,6 +42,11 @@ def jsonl_has_hook_marker(path: Path, window_id: str, window_name: str) -> bool:
         ).encode()
         with open(path, "rb") as fh:
             content = fh.read(_MAX_SCAN_BYTES)
-        return marker in content
+        # Require >=2 occurrences: real hook entries fire multiple times
+        # (SessionStart + Stop + Notification, etc.) so the marker appears
+        # repeatedly. A single occurrence is likely incidental — e.g. a
+        # tool output or prompt that contains the literal string (bit us
+        # Apr 14 when @19 got wired to @4 via one stray match).
+        return content.count(marker) >= 2
     except OSError:
         return False
