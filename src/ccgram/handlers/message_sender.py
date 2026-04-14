@@ -23,6 +23,7 @@ from telegram import Bot, CallbackQuery, LinkPreviewOptions, Message, ReactionTy
 from telegram.error import BadRequest, RetryAfter, TelegramError
 
 from ..entity_formatting import convert_to_entities
+from ..debug_timeline import get_timeline
 
 logger = structlog.get_logger()
 
@@ -126,6 +127,9 @@ async def _send_with_fallback(
     bot: Bot,
     chat_id: int,
     text: str,
+    *,
+    _window_id: str = "",
+    _window_name: str = "",
     **kwargs: Any,
 ) -> Message | None:
     """Send message with entity formatting, falling back to plain text on failure.
@@ -133,19 +137,53 @@ async def _send_with_fallback(
     Returns the sent Message on success, None on failure.
     """
     kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
+    message_thread_id = kwargs.get("message_thread_id")
+    tl = get_timeline()
+
+    await tl.log(
+        "send.attempt",
+        _window_id,
+        _window_name,
+        {
+            "chat_id": chat_id,
+            "message_thread_id": message_thread_id,
+            "text_preview": text[:200],
+            "text_len": len(text),
+        },
+    )
 
     async def _send(text: str, **kw: Any) -> Message:
         return await bot.send_message(chat_id=chat_id, text=text, **kw)
 
-    return await _with_entity_fallback(
-        _send, text, f"send message to {chat_id}", **kwargs
-    )
+    try:
+        result = await _with_entity_fallback(
+            _send, text, f"send message to {chat_id}", **kwargs
+        )
+        if result is not None:
+            await tl.log(
+                "send.success",
+                _window_id,
+                _window_name,
+                {"message_id": result.message_id},
+            )
+        return result
+    except Exception as exc:
+        await tl.log(
+            "send.error",
+            _window_id,
+            _window_name,
+            {"exc_type": type(exc).__name__, "exc": str(exc)},
+        )
+        raise
 
 
 async def rate_limit_send_message(
     bot: Bot,
     chat_id: int,
     text: str,
+    *,
+    _window_id: str = "",
+    _window_name: str = "",
     **kwargs: Any,
 ) -> Message | None:
     """Rate-limited send with entity formatting fallback.
@@ -154,7 +192,14 @@ async def rate_limit_send_message(
     Returns the sent Message on success, None on failure.
     """
     await rate_limit_send(chat_id)
-    return await _send_with_fallback(bot, chat_id, text, **kwargs)
+    return await _send_with_fallback(
+        bot,
+        chat_id,
+        text,
+        _window_id=_window_id,
+        _window_name=_window_name,
+        **kwargs,
+    )
 
 
 async def safe_reply(message: Message, text: str, **kwargs: Any) -> Message | None:

@@ -888,6 +888,20 @@ async def post_init(application: Application) -> None:
     session_monitor = monitor
     logger.info("Session monitor started")
 
+    # Debug timeline: cleanup old files and start pane captures
+    from .debug_timeline import get_timeline as _get_timeline
+    _tl = _get_timeline()
+    await _tl.cleanup_old()
+    from . import __version__ as _ccgram_version
+    await _tl.log("system.startup", "", "", {"version": _ccgram_version})
+
+    # Start pane captures for all bound windows
+    from .thread_router import thread_router as _tr
+    for _uid, _tid, _wid in _tr.iter_thread_bindings():
+        if _wid:
+            _wname = _tr.get_display_name(_wid)
+            await tmux_manager.start_pane_capture(_wid, _wname)
+
     # Start status polling task (routed through PTB error handler)
     _status_poll_task = asyncio.create_task(status_poll_loop(application.bot))
     _status_poll_task.add_done_callback(task_done_callback)

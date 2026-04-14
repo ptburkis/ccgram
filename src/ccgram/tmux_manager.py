@@ -661,6 +661,48 @@ class TmuxManager:
             self._pane_send, window_id, "", enter=True, literal=False
         )
 
+    async def start_pane_capture(self, window_id: str, window_name: str = "") -> None:
+        """Start tmux pipe-pane capture for a window to a terminal log file.
+
+        Idempotent: disables any existing pipe-pane first, then re-enables.
+        Writes output to ~/.ccgram/debug/terminal-<window_id>.log.
+
+        Args:
+            window_id: Tmux window ID, e.g. "@19".
+            window_name: Human-readable window name (for logging only).
+        """
+        debug_dir = Path.home() / ".ccgram" / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_wid = window_id.lstrip("@")
+        log_path = debug_dir / f"terminal-{safe_wid}.log"
+
+        if is_foreign_window(window_id):
+            target = window_id
+        else:
+            target = f"{self.session_name}:{window_id}"
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "tmux", "pipe-pane", "-t", target, "",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+
+            proc = await asyncio.create_subprocess_exec(
+                "tmux", "pipe-pane", "-t", target,
+                f"cat >> {log_path}",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            logger.debug(
+                "tmux pipe-pane started for window %s -> %s", window_id, log_path
+            )
+        except OSError as exc:
+            logger.debug("start_pane_capture failed for %s: %s", window_id, exc)
+
     async def send_keys(
         self,
         window_id: str,
@@ -684,6 +726,19 @@ class TmuxManager:
         Returns:
             True if successful, False otherwise
         """
+        await get_timeline().log(
+            "injection",
+            window_id,
+            "",
+            {
+                "text_preview": text[:200],
+                "text_len": len(text),
+                "enter": enter,
+                "literal": literal,
+                "raw": raw,
+            },
+        )
+
         if literal and enter and not raw:
             return await self._send_literal_then_enter(window_id, text)
 

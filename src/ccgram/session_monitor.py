@@ -33,6 +33,7 @@ from .providers import (
 )
 from .session import parse_session_map
 from .tmux_manager import tmux_manager
+from .debug_timeline import get_timeline
 from .utils import (
     log_throttle_reset,
     log_throttled,
@@ -347,6 +348,27 @@ class SessionMonitor:
                         timestamp=data.get("ts", 0.0),
                     )
                     self.state.events_offset = await f.tell()
+
+                    # Extract window_id and window_name from window_key for timeline
+                    _wk = event.window_key
+                    _hook_wid = _wk.rsplit(":", 1)[-1] if ":" in _wk else _wk
+                    _hook_wname = ""
+                    for _details in self._last_session_map.values():
+                        if _details.get("session_id") == event.session_id:
+                            _hook_wname = _details.get("window_name", "")
+                            break
+                    await get_timeline().log(
+                        "hook",
+                        _hook_wid,
+                        _hook_wname,
+                        {
+                            "event_type": event.event_type,
+                            "window_key": event.window_key,
+                            "session_id": event.session_id,
+                            "data": {k: v for k, v in (event.data or {}).items()
+                                     if k in ("tool_name", "tool_use_id", "exit_code")},
+                        },
+                    )
 
                     try:
                         await self._hook_event_callback(event)
@@ -664,6 +686,15 @@ class SessionMonitor:
         else:
             self._pending_tools.pop(session_id, None)
 
+        # Resolve window_name for timeline logging
+        _window_name = ""
+        if window_id:
+            for _wkey, _details in self._last_session_map.items():
+                if _details.get("session_id") == session_id:
+                    _window_name = _details.get("window_name", "")
+                    break
+
+        _tl = get_timeline()
         for entry in agent_messages:
             if not entry.text:
                 continue
@@ -677,6 +708,20 @@ class SessionMonitor:
                     role=entry.role,
                     tool_name=entry.tool_name,
                 )
+            )
+            # Log transcript event to debug timeline
+            await _tl.log(
+                "transcript",
+                window_id,
+                _window_name,
+                {
+                    "session_id": session_id,
+                    "role": entry.role,
+                    "content_type": entry.content_type,
+                    "text_preview": entry.text[:200],
+                    "tool_name": entry.tool_name,
+                    "is_complete": True,
+                },
             )
 
         self.state.update_session(tracked)
