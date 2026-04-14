@@ -325,6 +325,13 @@ async def _forward_message(
 
     clear_probe_failures(window_id)
 
+    # Auto-heal stale session_map entry (Claude rotated sessions, hook missed).
+    from ..session_autoheal import maybe_refresh_session_map
+    try:
+        await maybe_refresh_session_map(window_id)
+    except Exception:
+        logger.debug("auto-heal failed for %s, continuing", window_id, exc_info=True)
+
     success, err_message = await send_to_window(window_id, text)
     if not success:
         await safe_reply(message, f"\u274c {err_message}")
