@@ -1224,7 +1224,7 @@ async def usage_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> 
     import subprocess as _sp
     try:
         result = _sp.run(
-            ["/home/peter/ccgram-dashboard/scrape-usage.sh", "james", "bulugo_lead_gen"],
+            ["/home/peter/ccgram-dashboard/scrape-usage.sh", "usage-scraper", "usage-scraper-codex"],
             capture_output=True, text=True, timeout=15
         )
         if result.returncode != 0 or not result.stdout.strip():
