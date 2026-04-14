@@ -1284,7 +1284,10 @@ async def usage_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> 
     # Codex
     cx = data.get("codex", {})
     if cx:
-        lines.append(f"🟢 Codex: {cx['percent']}% used · {cx.get('remaining', '?')}% left")
+        parts = [f"🟢 Codex: {cx['percent']}% used · {cx.get('remaining', '?')}% left"]
+        if cx.get('resets'):
+            parts.append(f"resets {cx['resets']}")
+        lines.append(' · '.join(parts))
 
     if not lines:
         await safe_reply(update.message, "⚠️ No usage data available.")
