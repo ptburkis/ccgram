@@ -417,7 +417,15 @@ _NON_SPINNER_RANGES = (
     (0x2500, 0x257F),  # box-drawing characters
     (0x2580, 0x259F),  # block elements (includes Claude Code logo chars ▘▝▜▛▟▙)
 )
-_NON_SPINNER_CHARS = frozenset("─│┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬>|+<=~")
+_NON_SPINNER_CHARS = frozenset(
+    # Box drawing
+    "─│┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬>|+<=~"
+    # Response / bullet markers Claude Code uses to introduce output
+    # (NOT status spinners): "● Hello.", "○ option", etc. Without this,
+    # the spinner scan treats assistant-reply bullets as status lines and
+    # fires the Telegram typing indicator on idle windows.
+    "●○◌◍◎◉"
+)
 
 # Unicode categories that spinner characters typically belong to.
 # So = Symbol Other (✻, ✽, ✶, ✳, ✢, ☐, ✔, ☒)
