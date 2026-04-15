@@ -8,6 +8,7 @@ Key classes: MonitorState, TrackedSession.
 """
 
 import json
+import sqlite3
 import structlog
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -55,11 +56,39 @@ class MonitorState:
     def load(self) -> None:
         """Load state from file.
 
-        # TODO: still legacy — see Phase 4 follow-up (retirement timeline in
-        # docs/plans/state-unification-runbook.md). Monitor state is mirrored
-        # to DB user_prefs scope='monitor' by the migration; this reader
-        # should prefer it DB-first once the shadow-write window closes.
+        # DB-first since Chunk H follow-up; legacy JSON path retained for fallback
+        # until write-retirement (docs/plans/state-unification-runbook.md).
         """
+        # Attempt DB read first
+        from . import store
+        try:
+            with store.connect() as conn:
+                prefs = store.list_prefs(conn, "monitor")
+        except (sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError):
+            prefs = []
+        if prefs:
+            # Rehydrate tracked_sessions from (scope_id=session_id, key, value)
+            tmp: dict[str, dict] = {}
+            for session_id, key, value in prefs:
+                tmp.setdefault(session_id, {})[key] = value
+            self.tracked_sessions = {
+                sid: TrackedSession(
+                    session_id=sid,
+                    file_path=d.get("file_path", ""),
+                    last_byte_offset=d.get("last_byte_offset", 0),
+                )
+                for sid, d in tmp.items()
+                if d.get("file_path")
+            }
+            logger.info(
+                "Loaded %d tracked sessions from DB",
+                len(self.tracked_sessions),
+            )
+            return
+        logger.warning(
+            "falling back to legacy monitor_state.json"
+            " — DB is empty or unavailable"
+        )
         if not self.state_file.exists():
             logger.debug("State file does not exist: %s", self.state_file)
             return

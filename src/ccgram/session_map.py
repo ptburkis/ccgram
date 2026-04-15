@@ -20,7 +20,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import aiofiles
+import sqlite3
 
+from . import store
 from .config import config
 from .utils import atomic_write_json
 from .window_resolver import EMDASH_SESSION_PREFIX, is_foreign_window, is_window_id
@@ -98,11 +100,24 @@ class SessionMapSync:
         Also cleans up window_states entries not in current session_map.
         Updates window_display_names from the "window_name" field in values.
 
-        # TODO: still legacy — see Phase 4 follow-up.
-        # DB (store.list_sessions) mirrors this data via Chunk E shadow writes;
-        # once retirement criteria in the runbook hold, this loader should be
-        # replaced by a store.* lookup keyed on session_id rather than window_id.
+        # DB-first since Chunk H follow-up; legacy JSON path retained for fallback
+        # until write-retirement (docs/plans/state-unification-runbook.md).
+        # TODO: transcript_path and provider_name are not in the sessions table —
+        # those fields still come from session_map.json when DB path is used.
         """
+        # Attempt DB read first
+        try:
+            with store.connect() as conn:
+                sessions = store.list_sessions(conn)
+        except (sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError):
+            sessions = []
+        if not sessions:
+            logger.warning(
+                "falling back to legacy session_map.json"
+                " — DB sessions empty or unavailable"
+            )
+        else:
+            self._seed_window_store_from_db(sessions)
         if not config.session_map_file.exists():
             return
         try:
@@ -149,6 +164,23 @@ class SessionMapSync:
 
         if changed:
             self._schedule_save()
+
+    def _seed_window_store_from_db(self, sessions: list) -> None:
+        """Seed window_store session_id/cwd from DB sessions list.
+
+        transcript_path and provider_name are NOT in the sessions table —
+        those remain populated by the JSON path on subsequent polls.
+        """
+        from .window_state_store import window_store
+
+        for s in sessions:
+            if not s.window_id:
+                continue
+            state = window_store.get_window_state(s.window_id)
+            if not state.session_id:
+                state.session_id = s.session_id
+            if not state.cwd:
+                state.cwd = s.cwd
 
     def _process_session_map_entries(
         self,
