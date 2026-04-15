@@ -36,6 +36,7 @@ def jsonl_has_hook_marker(path: Path, window_id: str, window_name: str) -> bool:
         ``True`` if the marker is present, ``False`` otherwise.
     """
     try:
+        import re as _re
         stem = path.stem
         marker = (
             f"tmux key=ccgram:{window_id}, window_name={window_name}, session_id={stem}"
@@ -47,6 +48,19 @@ def jsonl_has_hook_marker(path: Path, window_id: str, window_name: str) -> bool:
         # repeatedly. A single occurrence is likely incidental — e.g. a
         # tool output or prompt that contains the literal string (bit us
         # Apr 14 when @19 got wired to @4 via one stray match).
-        return content.count(marker) >= 2
+        if content.count(marker) >= 2:
+            return True
+        # Tmux window IDs (@N) change when the tmux server restarts, but
+        # window_name and session_id (stem) are stable across restarts.
+        # Accept markers written under any window_id as long as window_name
+        # AND session_id match — this prevents legitimate continuations from
+        # being flagged as bleed bugs after a tmux restart.
+        name_pattern = (
+            rb'tmux key=ccgram:@\w+, window_name='
+            + _re.escape(window_name.encode())
+            + rb', session_id='
+            + _re.escape(stem.encode())
+        )
+        return len(_re.findall(name_pattern, content)) >= 2
     except OSError:
         return False
