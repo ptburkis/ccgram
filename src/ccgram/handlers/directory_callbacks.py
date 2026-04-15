@@ -524,7 +524,7 @@ def _try_install_messaging_skill(provider_name: str, cwd: str) -> None:
         logger.exception("Failed to install messaging skill at %s", cwd)
 
 
-async def _create_window_and_bind(
+async def _create_window_and_bind(  # noqa: PLR0912
     query: CallbackQuery,
     user_id: int,
     selected_path: str,
@@ -588,6 +588,27 @@ async def _create_window_and_bind(
         chat = query_message.chat if query_message else None
         if chat and chat.type in ("group", "supergroup"):
             thread_router.set_group_chat_id(user_id, pending_thread_id, chat.id)
+
+        # State unification shadow write: also record in unified DB store.
+        # Legacy writes above remain authoritative during migration — this is
+        # belt-and-braces so every new session gets a DB row.
+        try:
+            from ccgram import session_lifecycle as _sl
+
+            group_id = chat.id if (chat and chat.type in ("group", "supergroup")) else None
+            if group_id is not None:
+                await _sl.create_session(
+                    cwd=selected_path,
+                    topic_name=created_wname,
+                    agent=provider_name,
+                    mode=approval_mode,
+                    group_id=group_id,
+                    existing_topic_id=pending_thread_id,
+                )
+        except Exception as _exc:  # noqa: BLE001
+            logger.warning(
+                "directory_callbacks: create_session shadow write failed: %s", _exc
+            )
 
     if approval_mode == "yolo" and provider_name == "claude":
         await _accept_yolo_confirmation(created_wid)

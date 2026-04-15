@@ -14,7 +14,7 @@ Authority order (verbatim from design doc):
 | User-chosen bindings | DB topic_bindings |
 
 Issue kinds:
-- ``title_drift``       — DB topic_title != MTProto live title  (manual_review until Chunk F)
+- ``title_drift``       — DB topic_title != MTProto live title  (auto_fix — MTProto is authority for topic titles)
 - ``orphan_topic``      — MTProto has topic, no DB binding       (manual_review)
 - ``orphan_binding``    — DB binding with gone/retired session   (manual_review)
 - ``orphan_window``     — tmux window with no DB session row     (manual_review)
@@ -24,7 +24,6 @@ Issue kinds:
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 from collections import defaultdict
@@ -37,7 +36,6 @@ import structlog
 
 from ccgram import store
 from ccgram.mtproto_client import ForumTopic
-from ccgram.utils import ccgram_dir
 
 logger = structlog.get_logger(__name__)
 
@@ -145,30 +143,19 @@ async def _default_topic_fetcher(group_id: int) -> list[ForumTopic]:
 
 
 async def _default_session_identity_fetcher() -> dict[str, str]:
-    """Read session_map.json and return window_id -> session_id mapping.
+    """Resolve window_id -> session_id by scanning live tmux panes.
 
-    Keys in session_map.json look like ``"ccgram:@5"``; the prefix is stripped
-    so the returned dict uses bare window IDs (``"@5"``).
-
-    TODO: Once Chunk F lands (transcript watcher keyed on CCGRAM_SESSION_ID),
-    replace this implementation with a scan of running tmux panes' environments
-    for the CCGRAM_SESSION_ID marker — more authoritative than the JSON file.
+    Uses CCGRAM_SESSION_ID marker (marker file first, /proc env fallback).
+    Raises DuplicateSessionIdError if two windows share a session_id — the
+    reconcile caller should surface this loudly.
     """
-    path = ccgram_dir() / "session_map.json"
-    if not path.exists():
-        return {}
-    try:
-        raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("reconcile.session_map_read_error", error=str(exc))
-        return {}
-    result: dict[str, str] = {}
-    for key, val in raw.items():
-        # Key format is "session_name:@N" — take only the part after the last ":"
-        window_id = key.rsplit(":", 1)[-1] if ":" in key else key
-        if isinstance(val, dict) and "session_id" in val:
-            result[window_id] = val["session_id"]
-    return result
+    from ccgram.session_watcher import scan_all_pane_identities
+    from ccgram.tmux_manager import TmuxManager
+
+    manager = TmuxManager()
+    windows = await manager.list_windows()
+    window_ids = [w.window_id for w in windows if w.window_id]
+    return scan_all_pane_identities(window_ids)
 
 
 # ---- Issue checkers ----------------------------------------------------------
@@ -190,13 +177,8 @@ def _check_title_drift(
             issues.append(
                 ReconcileIssue(
                     kind="title_drift",
-                    severity="manual_review",
-                    detail=(
-                        f"topic {binding.topic_id}: DB title {binding.topic_title!r}"
-                        f" != live title {topic.title!r}"
-                        " (could be a rename OR a wrong-session binding — "
-                        "cannot disambiguate until session_id markers land in Chunk F)"
-                    ),
+                    severity="auto_fix",
+                    detail=f"topic {binding.topic_id}: DB title {binding.topic_title!r} != live title {topic.title!r}",
                     suggested_fix={
                         "action": "update_topic_title",
                         "group_id": group_id,
@@ -441,12 +423,8 @@ async def reconcile(
                                    ``ForumTopic``.  Defaults to
                                    ``MTProtoClient().list_forum_topics()``.
         session_identity_fetcher:  Async callable → ``{window_id: session_id}``.
-                                   Defaults to reading ``~/.ccgram/session_map.json``
-                                   (strips ``"ccgram:"`` prefix from keys).
-
-                                   TODO: Once Chunk F lands, replace with a
-                                   CCGRAM_SESSION_ID env-marker scan across running
-                                   tmux panes for a more authoritative source.
+                                   Resolves by scanning live pane environments for
+                                   CCGRAM_SESSION_ID (marker file first, /proc env fallback).
 
     Returns:
         :class:`ReconcileReport` with all detected issues and applied fixes.

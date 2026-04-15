@@ -60,11 +60,13 @@ every caller to configure or stub.
 
 from __future__ import annotations
 
+import contextlib
 import shlex
 import sqlite3
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 import structlog
@@ -282,6 +284,11 @@ async def create_session(
                 f"CCGRAM_SESSION_ID={shlex.quote(session_id)} {launch_cmd}"
             )
             await _tmux_send_keys_fn(window_id, full_cmd)
+            # Write per-window session_id marker file (atomic replace) so
+            # the transcript watcher can resolve window -> session_id even
+            # when /proc env is unavailable (e.g. short-lived child procs
+            # inside the pane). See Chunk F.
+            _write_session_marker_file(window_id, session_id)
         except Exception as exc:
             raise AgentLaunchError(
                 f"Failed to launch {agent} in window {window_id}: {exc}"
@@ -406,6 +413,25 @@ async def delete_session(
 
 
 # ---- Internal: helpers -------------------------------------------------------
+
+
+def _write_session_marker_file(window_id: str, session_id: str) -> None:
+    """Atomically write session_id to ~/.ccgram/debug/terminal-<window_id>.sid."""
+    target = Path.home() / ".ccgram" / "debug" / f"terminal-{window_id}.sid"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(session_id)
+        tmp.replace(target)
+        with contextlib.suppress(OSError):
+            target.chmod(0o600)
+    except OSError as exc:
+        logger.warning(
+            "session_lifecycle.marker_write_failed",
+            window_id=window_id,
+            session_id=session_id,
+            error=str(exc),
+        )
 
 
 def _assert_binding_free(

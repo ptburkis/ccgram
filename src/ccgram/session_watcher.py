@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import structlog
 from pathlib import Path
 
@@ -30,6 +31,158 @@ _MARKER_READ_CAP = 64 * 1024
 
 # Brief delay after IN_CREATE before reading — gives Claude time to write the first line.
 _CREATE_SETTLE_SECS = 0.3
+
+
+# ---- Session identity resolution (Chunk F) -----------------------------------
+
+
+class DuplicateSessionIdError(Exception):
+    """Raised when two tmux windows claim the same CCGRAM_SESSION_ID."""
+
+
+def _get_pane_pid(window_id: str) -> int | None:
+    """Return the foreground pane PID for window_id via tmux display-message."""
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", window_id, "#{pane_pid}"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode != 0:
+            return None
+        stripped = result.stdout.strip()
+        if not stripped:
+            return None
+        return int(stripped)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        return None
+
+
+def _read_proc_environ(pid: int) -> bytes | None:
+    """Read /proc/<pid>/environ as bytes, or None on any error."""
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as fh:
+            return fh.read()
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+        return None
+
+
+def _get_child_pids(pid: int) -> list[int]:
+    """Return immediate child PIDs of pid by scanning /proc/*/status."""
+    children: list[int] = []
+    try:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                content = (entry / "status").read_text()
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+            for line in content.splitlines():
+                if line.startswith("PPid:"):
+                    ppid_str = line.split(":", 1)[1].strip()
+                    try:
+                        if int(ppid_str) == pid:
+                            children.append(int(entry.name))
+                    except ValueError:
+                        pass
+                    break
+    except OSError:
+        pass
+    return children
+
+
+def _extract_session_id_from_environ(environ_bytes: bytes) -> str | None:
+    """Extract CCGRAM_SESSION_ID value from null-delimited environ bytes."""
+    prefix = b"CCGRAM_SESSION_ID="
+    for entry in environ_bytes.split(b"\x00"):
+        if entry.startswith(prefix):
+            value = entry[len(prefix):].decode("utf-8", errors="replace")
+            return value if value else None
+    return None
+
+
+def read_session_id_from_marker_file(window_id: str) -> str | None:
+    """Read session_id from ~/.ccgram/debug/terminal-<window_id>.sid.
+
+    Returns None if the file is missing, unreadable, or empty.
+    """
+    path = Path.home() / ".ccgram" / "debug" / f"terminal-{window_id}.sid"
+    try:
+        text = path.read_text().strip()
+        return text if text else None
+    except OSError:
+        return None
+
+
+def read_session_id_from_pane_env(window_id: str) -> str | None:
+    """Look up CCGRAM_SESSION_ID in the tmux pane's process tree.
+
+    Resolves the pane's pid via tmux display-message -p -t <wid> '#{pane_pid}',
+    then BFS-walks up to 4 levels of child processes reading /proc/<pid>/environ
+    for CCGRAM_SESSION_ID=.  Uses _get_child_pids for child discovery.
+
+    Returns the session_id or None if not found (pid gone, env var absent,
+    tmux call failed, etc.).
+    """
+    pane_pid = _get_pane_pid(window_id)
+    if pane_pid is None:
+        return None
+
+    frontier = [pane_pid]
+    for _ in range(5):  # depths 0..4 inclusive from pane_pid
+        if not frontier:
+            break
+        next_frontier: list[int] = []
+        for pid in frontier:
+            env_bytes = _read_proc_environ(pid)
+            if env_bytes is not None:
+                sid = _extract_session_id_from_environ(env_bytes)
+                if sid:
+                    return sid
+            next_frontier.extend(_get_child_pids(pid))
+        frontier = next_frontier
+    return None
+
+
+def resolve_session_identity(window_id: str) -> str | None:
+    """Marker file first; env-var fallback second.  None if both miss."""
+    sid = read_session_id_from_marker_file(window_id)
+    if sid is not None:
+        return sid
+    return read_session_id_from_pane_env(window_id)
+
+
+def scan_all_pane_identities(window_ids: list[str]) -> dict[str, str]:
+    """Resolve every window's session_id.  Omit windows with no identity.
+
+    Raises DuplicateSessionIdError if two distinct windows resolve to the same
+    session_id — this is the loud-failure signal for the reconcile path.
+    """
+    if not window_ids:
+        return {}
+
+    result: dict[str, str] = {}
+    reverse: dict[str, list[str]] = {}
+
+    for window_id in window_ids:
+        sid = resolve_session_identity(window_id)
+        if sid is None:
+            continue
+        result[window_id] = sid
+        if sid not in reverse:
+            reverse[sid] = []
+        reverse[sid].append(window_id)
+
+    for sid, windows in reverse.items():
+        if len(windows) > 1:
+            raise DuplicateSessionIdError(
+                f"session_id {sid!r} claimed by multiple windows: {sorted(windows)}"
+            )
+
+    return result
+
 
 
 def _is_enabled() -> bool:
@@ -285,6 +438,12 @@ def _find_window_for_jsonl(
         # single-occurrence is incidental (tool output / prompt literal).
         if content.count(marker) >= 2:
             current_sid = entry.get("session_id") or None
+            logger.warning(
+                "session_fallback_legacy_window",
+                window_id=window_id,
+                cwd=entry.get("cwd", ""),
+                reason="no CCGRAM_SESSION_ID marker — using legacy hook-marker cwd heuristic",
+            )
             return window_id, window_name, current_sid
 
     return None

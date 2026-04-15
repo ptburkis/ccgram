@@ -168,6 +168,26 @@ async def create_topic_in_chat(
             window_id,
         )
         _bind_topic_to_user(topic.message_thread_id, window_id, chat_id, topic_name)
+        # State unification shadow write.
+        try:
+            from ccgram import session_lifecycle as _sl
+            ws = session_manager.get_window_state(window_id)
+            cwd = ws.cwd or ""
+            agent = ws.provider_name or "claude"
+            mode = ws.approval_mode if hasattr(ws, "approval_mode") else None
+            if cwd:
+                await _sl.create_session(
+                    cwd=cwd,
+                    topic_name=topic_name,
+                    agent=agent,
+                    mode=mode,
+                    group_id=chat_id,
+                    existing_topic_id=topic.message_thread_id,
+                )
+        except Exception as _exc:  # noqa: BLE001
+            logger.warning(
+                "topic_orchestration: create_session shadow write failed: %s", _exc
+            )
     except RetryAfter as e:
         retry_after_seconds = (
             e.retry_after

@@ -148,6 +148,18 @@ def _atomic_write_message(path: Path, data: dict[str, Any]) -> None:
         raise
 
 
+_HEARTBEAT_FILE = Path.home() / ".ccgram" / "heartbeats" / "ccgram-main.txt"
+
+
+def _write_heartbeat() -> None:
+    """Atomic heartbeat write for the watchdog. Swallows errors."""
+    with contextlib.suppress(OSError):
+        _HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _HEARTBEAT_FILE.with_suffix(".tmp")
+        tmp.write_text(str(int(time.time())))
+        os.replace(str(tmp), str(_HEARTBEAT_FILE))
+
+
 class Mailbox:
     """File-based message mailbox with per-window inboxes.
 
@@ -378,6 +390,8 @@ class Mailbox:
         )
         removed = sum(self._sweep_dir(d) for d in dirs if d.is_dir())
         logger.debug("Sweep completed", removed=removed, window_id=window_id)
+        if window_id is None:
+            _write_heartbeat()
         return removed
 
     def _sweep_dir(self, inbox_dir: Path) -> int:

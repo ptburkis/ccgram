@@ -88,6 +88,20 @@ async def _close_expired_topic(bot: Bot, user_id: int, thread_id: int) -> None:
             window_dead=True,
         )
         thread_router.unbind_thread(user_id, thread_id)
+        # State unification shadow write: mark session retired in DB.
+        try:
+            from ccgram import session_lifecycle as _sl
+            from ccgram.store import connect as _db_connect, get_session_by_window
+
+            if window_id:
+                with _db_connect() as _conn:
+                    _sess = get_session_by_window(_conn, window_id)
+                if _sess is not None:
+                    await _sl.delete_session(_sess.session_id)
+        except Exception as _exc:  # noqa: BLE001
+            logger.warning(
+                "topic_lifecycle: delete_session shadow write failed: %s", _exc
+            )
 
 
 # ── Unbound window TTL ────────────────────────────────────────────────────

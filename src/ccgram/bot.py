@@ -96,6 +96,7 @@ from .handlers.message_sender import safe_reply
 from .handlers.response_builder import build_response_parts
 from .handlers.polling_coordinator import status_poll_loop
 from .handlers.file_handler import handle_document_message, handle_photo_message
+from .handlers.forum_topic_created import forum_topic_created_handler as _forum_topic_created_handler
 from .handlers.voice_handler import handle_voice_message
 from .handlers.text_handler import handle_text_message
 from .session import session_manager
@@ -827,6 +828,37 @@ async def post_init(application: Application) -> None:
     # Re-resolve stale window IDs from persisted state against live tmux windows
     await session_manager.resolve_stale_ids()
 
+    # State unification: wire session_lifecycle with production deps.
+    from ccgram import session_lifecycle as _session_lifecycle
+    from ccgram.mtproto_client import MTProtoClient as _MTProtoClient
+    from ccgram.mtproto_client import MTProtoCredentialsError as _MTProtoCredentialsError
+
+    try:
+        _mtproto_client = _MTProtoClient()
+    except _MTProtoCredentialsError as _exc:
+        logger.warning(
+            "MTProto credentials missing — session_lifecycle running without "
+            "topic verification (shadow writes will fail silently): %s",
+            _exc,
+        )
+
+        class _StubMTProtoClient:
+            async def get_forum_topics_by_id(
+                self, *_: object, **__: object
+            ) -> list:
+                return []
+
+        _mtproto_client = _StubMTProtoClient()  # type: ignore[assignment]
+
+    _session_lifecycle.configure(
+        _session_lifecycle.build_default_deps(
+            bot=application.bot,
+            mtproto_client=_mtproto_client,
+            tmux_manager_obj=tmux_manager,
+        )
+    )
+    logger.info("session_lifecycle configured")
+
     await _adopt_unbound_windows(application.bot)
 
     # Warn if Claude Code hooks are not installed (provider-aware, non-blocking)
@@ -1444,6 +1476,13 @@ def create_bot() -> Application:
         MessageHandler(
             filters.StatusUpdate.FORUM_TOPIC_EDITED & _group_filter,
             topic_edited_handler,
+        )
+    )
+    # Topic created event — show directory browser for new topics
+    application.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.FORUM_TOPIC_CREATED & _group_filter,
+            _forum_topic_created_handler,
         )
     )
     # Forward any other /command to the topic's provider CLI

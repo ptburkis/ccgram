@@ -114,6 +114,22 @@ class TestCreateSessionHappyPath:
         assert binding is not None
         assert binding.topic_id == 77
 
+    @pytest.mark.asyncio
+    async def test_marker_file_written(self, ccgram_test_dir, stubs, monkeypatch, tmp_path):
+        monkeypatch.setattr("ccgram.session_lifecycle.Path.home", lambda: tmp_path)
+
+        session_id = await session_lifecycle.create_session(
+            cwd=str(ccgram_test_dir),
+            topic_name="marker-test",
+            agent="claude",
+            group_id=-1001,
+        )
+
+        marker = tmp_path / ".ccgram" / "debug" / "terminal-@99.sid"
+        assert marker.exists()
+        assert marker.read_text() == session_id
+        assert (marker.stat().st_mode & 0o777) == 0o600
+
 
 # ---- create_session: existing-topic failures --------------------------------
 

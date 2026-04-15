@@ -95,7 +95,7 @@ async def test_clean_state_empty_report(tmp_path):
     assert report.manual_review_count == 0
 
 
-async def test_title_drift_manual_review(tmp_path):
+async def test_title_drift_auto_fix(tmp_path):
     db = tmp_path / "state.db"
     _setup_db(db)
     with store.connect(db) as conn:
@@ -116,9 +116,7 @@ async def test_title_drift_manual_review(tmp_path):
     assert len(report.issues) == 1
     issue = report.issues[0]
     assert issue.kind == "title_drift"
-    # Until Chunk F (session_id markers), title drift could indicate EITHER a
-    # legitimate rename OR a wrong-session binding — can't auto-apply safely.
-    assert issue.severity == "manual_review"
+    assert issue.severity == "auto_fix"
     assert issue.suggested_fix is not None
     assert issue.suggested_fix["new_title"] == "new"
     assert issue.suggested_fix["topic_id"] == 10
@@ -276,11 +274,9 @@ async def test_apply_writes_only_auto_fix(tmp_path):
         store.upsert_session(
             conn, session_id="sid-2", cwd="/other", agent="claude", status="active", window_id="@2"
         )
-        # title_drift: topic 10, DB="old" but MTProto will say "new"
         store.upsert_topic_binding(
             conn, group_id=GROUP, topic_id=10, session_id="sid-1", topic_title="old"
         )
-        # orphan_binding: topic 30 references a session that won't exist in MTProto
         store.upsert_topic_binding(
             conn, group_id=GROUP, topic_id=30, session_id="sid-2", topic_title="gone"
         )
@@ -294,21 +290,19 @@ async def test_apply_writes_only_auto_fix(tmp_path):
         session_identity_fetcher=lambda: _identity({"@1": "sid-1", "@2": "sid-2"}),
     )
 
-    # Nothing applied — title_drift is manual_review until Chunk F, and
-    # orphan_topic / orphan_binding are manual_review by design.
-    assert report.applied == []
-    # All three issues surface in the report
+    assert len(report.applied) == 1
+    assert report.applied[0].kind == "title_drift"
     assert any(i.kind == "title_drift" for i in report.issues)
     assert any(i.kind == "orphan_topic" for i in report.issues)
     assert any(i.kind == "orphan_binding" for i in report.issues)
 
-    # DB: no writes — both binding rows untouched
     with store.connect(db) as conn:
         b10 = store.get_topic_binding(conn, GROUP, 10)
         b30 = store.get_topic_binding(conn, GROUP, 30)
     assert b10 is not None
-    assert b10.topic_title == "old"  # NOT overwritten
+    assert b10.topic_title == "new"
     assert b30 is not None
+    assert b30.topic_title == "gone"
 
 
 async def test_duplicate_binding_detected():
