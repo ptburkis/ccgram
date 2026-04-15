@@ -157,6 +157,21 @@ async def create_topic_in_chat(
         )
         return
 
+    # TEMPORARY KILL-SWITCH during state-unification live migration.
+    # Auto-create fires on every window output for windows without a binding,
+    # which produced dozens of duplicate topics during today's migration.
+    # Disabled until all windows are bound via `claude-hub spawn
+    # --existing-topic-id`; remove this guard (env var CCGRAM_ALLOW_AUTO_TOPIC)
+    # after the 7-day retirement soak per state-unification-runbook.md.
+    import os as _os
+    if not _os.environ.get("CCGRAM_ALLOW_AUTO_TOPIC"):
+        logger.warning(
+            "auto_create_topic_disabled window=%s chat=%d name=%r "
+            "(set CCGRAM_ALLOW_AUTO_TOPIC=1 to re-enable)",
+            window_id, chat_id, topic_name,
+        )
+        return
+
     try:
         topic = await bot.create_forum_topic(chat_id=chat_id, name=topic_name)
         _topic_create_retry_until.pop(chat_id, None)
