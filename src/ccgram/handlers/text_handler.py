@@ -54,6 +54,7 @@ _BASH_OUTPUT_LIMIT = 3800
 # Active bash capture tasks: (user_id, thread_id) -> asyncio.Task
 _bash_capture_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
 
+
 @topic_state.register("topic")
 def cancel_bash_capture(user_id: int, thread_id: int) -> None:
     """Cancel any running bash capture for this topic."""
@@ -327,6 +328,7 @@ async def _forward_message(
 
     # Auto-heal stale session_map entry (Claude rotated sessions, hook missed).
     from ..session_autoheal import maybe_refresh_session_map
+
     try:
         await maybe_refresh_session_map(window_id)
     except Exception:

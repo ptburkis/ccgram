@@ -39,7 +39,11 @@ class TimelineLogger:
             base_dir: Directory for timeline-YYYY-MM-DD.jsonl files.
         """
         self._base_dir = base_dir
-        self._enabled = os.environ.get("CCGRAM_DEBUG_ENABLED", "1") not in ("0", "false", "False")
+        self._enabled = os.environ.get("CCGRAM_DEBUG_ENABLED", "1") not in (
+            "0",
+            "false",
+            "False",
+        )
         self._lock = asyncio.Lock()
 
     def _today_path(self) -> Path:
@@ -71,20 +75,27 @@ class TimelineLogger:
         try:
             import json
 
-            ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + \
-                f"{datetime.now(tz=timezone.utc).microsecond // 1000:03d}Z"
+            ts = (
+                datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.")
+                + f"{datetime.now(tz=timezone.utc).microsecond // 1000:03d}Z"
+            )
 
-            line = json.dumps({
-                "ts": ts,
-                "window_id": window_id,
-                "window_name": window_name,
-                "event_type": event_type,
-                "data": data,
-            }, ensure_ascii=False)
+            line = json.dumps(
+                {
+                    "ts": ts,
+                    "window_id": window_id,
+                    "window_name": window_name,
+                    "event_type": event_type,
+                    "data": data,
+                },
+                ensure_ascii=False,
+            )
 
             async with self._lock:
                 self._base_dir.mkdir(parents=True, exist_ok=True)
-                async with aiofiles.open(self._today_path(), "a", encoding="utf-8") as f:
+                async with aiofiles.open(
+                    self._today_path(), "a", encoding="utf-8"
+                ) as f:
                     await f.write(line + "\n")
         except Exception as exc:  # noqa: BLE001
             logger.debug("timeline.log error (suppressed): %s", exc)

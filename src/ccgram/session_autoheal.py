@@ -90,8 +90,10 @@ def _find_newer_jsonl_sync(
     # Filter to only files that carry the hook marker for this window.
     # Skip the currently-tracked session — we already know about it.
     own_candidates = [
-        jf for jf in jsonl_files
-        if jf.stem != current_sid and _jsonl_belongs_to_window(jf, window_id, window_name)
+        jf
+        for jf in jsonl_files
+        if jf.stem != current_sid
+        and _jsonl_belongs_to_window(jf, window_id, window_name)
     ]
 
     if not own_candidates:
@@ -254,9 +256,7 @@ async def maybe_refresh_session_map(window_id: str) -> bool:
     try:
         return await _maybe_refresh_session_map_inner(window_id)
     except Exception:
-        logger.debug(
-            "auto-heal: unexpected error for %s", window_id, exc_info=True
-        )
+        logger.debug("auto-heal: unexpected error for %s", window_id, exc_info=True)
         return False
 
 
@@ -293,7 +293,9 @@ async def _maybe_refresh_session_map_inner(window_id: str) -> bool:
     # Pass window_id and window_name so we only consider jsonls that contain
     # the hook marker for THIS window (prevents shared-cwd windows stealing
     # each other's sessions).
-    window_name = getattr(state, "window_name", None) or getattr(state, "name", None) or ""
+    window_name = (
+        getattr(state, "window_name", None) or getattr(state, "name", None) or ""
+    )
     result = await asyncio.to_thread(
         _find_newer_jsonl_sync,
         project_dir,
@@ -341,7 +343,9 @@ async def _maybe_refresh_session_map_inner(window_id: str) -> bool:
         await session_manager.load_session_map()
     except Exception:
         logger.debug(
-            "auto-heal: load_session_map failed after heal for %s", window_id, exc_info=True
+            "auto-heal: load_session_map failed after heal for %s",
+            window_id,
+            exc_info=True,
         )
 
     logger.info(
@@ -367,18 +371,30 @@ async def apply_session_update(
     Returns True if both file writes succeeded and in-memory state refreshed.
     """
     ok = await asyncio.to_thread(
-        _update_session_map_sync, window_id, old_sid, new_sid, new_transcript,
+        _update_session_map_sync,
+        window_id,
+        old_sid,
+        new_sid,
+        new_transcript,
     )
     if not ok:
         return False
-    await asyncio.to_thread(_update_monitor_state_sync, old_sid, new_sid, new_transcript)
+    await asyncio.to_thread(
+        _update_monitor_state_sync, old_sid, new_sid, new_transcript
+    )
     from .session import session_manager
+
     try:
         await session_manager.load_session_map()
     except Exception:
-        logger.debug("%s: load_session_map failed for %s", source, window_id, exc_info=True)
+        logger.debug(
+            "%s: load_session_map failed for %s", source, window_id, exc_info=True
+        )
     logger.info(
         "%s: session update applied for %s: %s -> %s",
-        source, window_id, old_sid or "(none)", new_sid,
+        source,
+        window_id,
+        old_sid or "(none)",
+        new_sid,
     )
     return True

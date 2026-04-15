@@ -890,13 +890,16 @@ async def post_init(application: Application) -> None:
 
     # Debug timeline: cleanup old files and start pane captures
     from .debug_timeline import get_timeline as _get_timeline
+
     _tl = _get_timeline()
     await _tl.cleanup_old()
     from . import __version__ as _ccgram_version
+
     await _tl.log("system.startup", "", "", {"version": _ccgram_version})
 
     # Start pane captures for all bound windows
     from .thread_router import thread_router as _tr
+
     for _uid, _tid, _wid in _tr.iter_thread_bindings():
         if _wid:
             _wname = _tr.get_display_name(_wid)
@@ -909,6 +912,7 @@ async def post_init(application: Application) -> None:
 
     # Start inotify session watcher (event-driven session rotation detection)
     from .session_watcher import start_session_watcher
+
     await start_session_watcher()
 
 
@@ -1011,9 +1015,7 @@ def _format_activity_age(elapsed_secs: float) -> str:
     return f"{int(elapsed_secs // 3600)}h"
 
 
-async def terminal_command(
-    update: Update, _context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def terminal_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     """Return a tappable URL to the web terminal for this topic's bound window."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id) or not update.message:
@@ -1034,9 +1036,7 @@ async def terminal_command(
         await safe_reply(update.message, "\u274c Window not found.")
         return
     url = f"{_CCGRAM_WEB_BASE}/terminal/terminal/{window.window_name}"
-    await safe_reply(
-        update.message, f"\U0001f5a5 Web terminal: {url}"
-    )
+    await safe_reply(update.message, f"\U0001f5a5 Web terminal: {url}")
 
 
 async def dashboard_command(
@@ -1046,14 +1046,10 @@ async def dashboard_command(
     user = update.effective_user
     if not user or not is_user_allowed(user.id) or not update.message:
         return
-    await safe_reply(
-        update.message, f"\U0001f4ca Dashboard: {_CCGRAM_WEB_BASE}/hub/"
-    )
+    await safe_reply(update.message, f"\U0001f4ca Dashboard: {_CCGRAM_WEB_BASE}/hub/")
 
 
-async def files_command(
-    update: Update, _context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def files_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     """Return a tappable URL to the file browser for this topic's project directory."""
     user = update.effective_user
     if not user or not is_user_allowed(user.id) or not update.message:
@@ -1076,10 +1072,13 @@ async def files_command(
         window = next((w for w in all_windows if w.window_id == window_id), None)
         cwd = window.cwd if window else ""
     if not cwd:
-        await safe_reply(update.message, "\u274c Could not determine project directory.")
+        await safe_reply(
+            update.message, "\u274c Could not determine project directory."
+        )
         return
     # Build relative path from ~/projects/
     from pathlib import Path
+
     projects_root = Path.home() / "projects"
     try:
         rel = Path(cwd).relative_to(projects_root)
@@ -1087,7 +1086,6 @@ async def files_command(
     except ValueError:
         url = f"{_CCGRAM_WEB_BASE}/files/"
     await safe_reply(update.message, f"\U0001f4c1 Files: {url}")
-
 
 
 async def cwd_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1152,7 +1150,8 @@ async def busy_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> N
     # the typing-indicator heuristic thinks.
     if elapsed < 10.0:
         await safe_reply(
-            update.message, f"\u26a1 Processing \u2014 last activity {int(elapsed)}s ago"
+            update.message,
+            f"\u26a1 Processing \u2014 last activity {int(elapsed)}s ago",
         )
     else:
         await safe_reply(
@@ -1222,16 +1221,24 @@ async def usage_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     import subprocess as _sp
+
     try:
         result = _sp.run(
-            ["/home/peter/ccgram-dashboard/scrape-usage.sh", "usage-scraper", "usage-scraper-codex"],
-            capture_output=True, text=True, timeout=15
+            [
+                "/home/peter/ccgram-dashboard/scrape-usage.sh",
+                "usage-scraper",
+                "usage-scraper-codex",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         if result.returncode != 0 or not result.stdout.strip():
             await safe_reply(update.message, "⚠️ Could not fetch usage data.")
             return
 
         import json as _json
+
         data = _json.loads(result.stdout.strip())
     except Exception as e:
         await safe_reply(update.message, f"⚠️ Usage scrape failed: {e}")
@@ -1244,7 +1251,9 @@ async def usage_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> 
     days_since = (now.weekday() - 3) % 7
     if days_since == 0 and now.hour < 11:
         days_since = 7
-    last_reset = (now - timedelta(days=days_since)).replace(hour=11, minute=0, second=0, microsecond=0)
+    last_reset = (now - timedelta(days=days_since)).replace(
+        hour=11, minute=0, second=0, microsecond=0
+    )
     elapsed = now - last_reset
     expected_pct = (elapsed / timedelta(days=7)) * 100
 
@@ -1285,16 +1294,15 @@ async def usage_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> 
     cx = data.get("codex", {})
     if cx:
         parts = [f"🟢 Codex: {cx['percent']}% used · {cx.get('remaining', '?')}% left"]
-        if cx.get('resets'):
+        if cx.get("resets"):
             parts.append(f"resets {cx['resets']}")
-        lines.append(' · '.join(parts))
+        lines.append(" · ".join(parts))
 
     if not lines:
         await safe_reply(update.message, "⚠️ No usage data available.")
         return
 
     await safe_reply(update.message, "\n".join(lines))
-
 
 
 def create_bot() -> Application:
@@ -1365,12 +1373,8 @@ def create_bot() -> Application:
     application.add_handler(
         CommandHandler("files", files_command, filters=_group_filter)
     )
-    application.add_handler(
-        CommandHandler("cwd", cwd_command, filters=_group_filter)
-    )
-    application.add_handler(
-        CommandHandler("busy", busy_command, filters=_group_filter)
-    )
+    application.add_handler(CommandHandler("cwd", cwd_command, filters=_group_filter))
+    application.add_handler(CommandHandler("busy", busy_command, filters=_group_filter))
     application.add_handler(
         CommandHandler("fleet", fleet_command, filters=_group_filter)
     )

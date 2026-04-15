@@ -685,14 +685,21 @@ class TmuxManager:
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "tmux", "pipe-pane", "-t", target, "",
+                "tmux",
+                "pipe-pane",
+                "-t",
+                target,
+                "",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await proc.communicate()
 
             proc = await asyncio.create_subprocess_exec(
-                "tmux", "pipe-pane", "-t", target,
+                "tmux",
+                "pipe-pane",
+                "-t",
+                target,
                 f"cat >> {log_path}",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,

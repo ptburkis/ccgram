@@ -439,9 +439,7 @@ _STATUS_PROGRESS_RE = re.compile(r"^\s*(?:⎿\s*)?[✔◼◻◔]\s+\S")
 # Completion-time indicators: "✻ Cooked for 31s", "✻ Churned for 1m 43s", etc.
 # These appear AFTER a turn finishes and are past-tense — NOT active status.
 # The spinner character (✻) would otherwise pass is_likely_spinner().
-_COMPLETION_TIME_RE = re.compile(
-    r"^\s*\S\s+\w+(?:ed|ated)\s+for\s+\d+", re.IGNORECASE
-)
+_COMPLETION_TIME_RE = re.compile(r"^\s*\S\s+\w+(?:ed|ated)\s+for\s+\d+", re.IGNORECASE)
 
 
 def is_likely_spinner(char: str) -> bool:
@@ -560,9 +558,7 @@ def _collect_status_progress_lines(
 _TASKLIST_CHARS = frozenset("⎿◼✔◻◔")
 
 # Matches an active Claude status line: spinner + space + capitalized active verb.
-_STATUS_LINE_RE = re.compile(
-    r"^\s*\S\s+[A-Z][a-z]+(?:ing|ling|ating|izing|led|ized)\b"
-)
+_STATUS_LINE_RE = re.compile(r"^\s*\S\s+[A-Z][a-z]+(?:ing|ling|ating|izing|led|ized)\b")
 
 
 def _find_status_line_index(lines: list[str], scan_start: int) -> int | None:

@@ -340,9 +340,7 @@ class SessionMonitor:
 
                     event = HookEvent(
                         event_type=data.get("event", ""),
-                        window_key=_canonicalize_window_key(
-                            data.get("window_key", "")
-                        ),
+                        window_key=_canonicalize_window_key(data.get("window_key", "")),
                         session_id=data.get("session_id", ""),
                         data=data.get("data", {}),
                         timestamp=data.get("ts", 0.0),
@@ -365,8 +363,11 @@ class SessionMonitor:
                             "event_type": event.event_type,
                             "window_key": event.window_key,
                             "session_id": event.session_id,
-                            "data": {k: v for k, v in (event.data or {}).items()
-                                     if k in ("tool_name", "tool_use_id", "exit_code")},
+                            "data": {
+                                k: v
+                                for k, v in (event.data or {}).items()
+                                if k in ("tool_name", "tool_use_id", "exit_code")
+                            },
                         },
                     )
 
@@ -1032,6 +1033,7 @@ class SessionMonitor:
             # Only reconcile Claude (hook-based) windows — hookless providers
             # (codex, gemini) have their own transcript discovery.
             from .session import session_manager as _sm2
+
             ws = _sm2.window_states.get(wid)
             if ws and ws.provider_name and ws.provider_name != "claude":
                 continue
@@ -1132,7 +1134,9 @@ class SessionMonitor:
             for wid, sid, fname in healed:
                 logger.info(
                     "Reconciled session_map: %s -> %s (transcript=%s)",
-                    wid, sid, fname,
+                    wid,
+                    sid,
+                    fname,
                 )
 
     async def _monitor_loop(self) -> None:

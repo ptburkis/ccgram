@@ -36,7 +36,7 @@ _symbol.heading_level_4 = ""
 # Swap to heavy box-drawing horizontal which reads as a cleaner divider.
 # Same character count (8 → 8) so entity offsets are preserved.
 _HR_FROM = "\u2014" * 8  # em-dash × 8 (U+2014)
-_HR_TO = "\u2501" * 8    # heavy horizontal × 8 (U+2501 ━━━━━━━━)
+_HR_TO = "\u2501" * 8  # heavy horizontal × 8 (U+2501 ━━━━━━━━)
 
 _EXPQUOTE_RE = re.compile(
     re.escape(EXPANDABLE_QUOTE_START) + r"([\s\S]*?)" + re.escape(EXPANDABLE_QUOTE_END)

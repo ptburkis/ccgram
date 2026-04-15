@@ -39,6 +39,7 @@ def _is_enabled() -> bool:
 def _inotify_available() -> bool:
     try:
         import inotify_simple  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -83,7 +84,9 @@ async def _watcher_loop() -> None:
     except asyncio.CancelledError:
         logger.debug("session watcher: cancelled, exiting cleanly")
     except Exception:
-        logger.exception("session watcher: unhandled exception in watcher loop — exiting")
+        logger.exception(
+            "session watcher: unhandled exception in watcher loop — exiting"
+        )
 
 
 async def _run_watcher() -> None:
@@ -118,7 +121,8 @@ async def _run_watcher() -> None:
         except OSError as exc:
             logger.warning(
                 "session watcher: could not add watch for %s: %s — continuing with partial coverage",
-                directory, exc,
+                directory,
+                exc,
             )
 
     # Walk existing dirs under claude_projects and add watches.
@@ -127,7 +131,9 @@ async def _run_watcher() -> None:
         if child.is_dir():
             add_watch(child)
 
-    logger.info("session watcher: inotify watches established under %s", claude_projects)
+    logger.info(
+        "session watcher: inotify watches established under %s", claude_projects
+    )
 
     loop = asyncio.get_running_loop()
 
@@ -136,7 +142,9 @@ async def _run_watcher() -> None:
         events = await loop.run_in_executor(None, inotify.read, 1000)  # 1s timeout
         for event in events:
             try:
-                await _handle_inotify_event(event, wd_to_path, IN_CREATE, IN_ISDIR, add_watch)
+                await _handle_inotify_event(
+                    event, wd_to_path, IN_CREATE, IN_ISDIR, add_watch
+                )
             except Exception:
                 logger.exception("session watcher: error handling event %s", event)
 
@@ -204,13 +212,17 @@ async def _process_new_jsonl(jsonl_path: Path) -> None:
     if new_sid == old_sid:
         logger.debug(
             "session watcher: %s already tracked for @%s — skipping",
-            new_sid, window_id,
+            new_sid,
+            window_id,
         )
         return
 
     logger.info(
         "session watcher: detected rotation for %s (%s) — %s -> %s",
-        window_id, window_name, old_sid or "(none)", new_sid,
+        window_id,
+        window_name,
+        old_sid or "(none)",
+        new_sid,
     )
 
     from .session_autoheal import apply_session_update

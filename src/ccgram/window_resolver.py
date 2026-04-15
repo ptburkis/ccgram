@@ -138,9 +138,7 @@ def _resolve_thread_bindings(
                 if val in live_ids:
                     new_bindings[tid] = val
                 else:
-                    name = _lookup_window_name(
-                        val, window_display_names, window_states
-                    )
+                    name = _lookup_window_name(val, window_display_names, window_states)
                     new_id = live_by_name.get(name)
                     if new_id:
                         logger.info(

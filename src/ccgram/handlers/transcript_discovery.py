@@ -116,7 +116,9 @@ def _revoke_transcript_claim(transcript_path: str, new_owner_id: str) -> None:
         if wid == new_owner_id:
             continue
         if ws.transcript_path == transcript_path:
-            logger.info("PTY override: revoking %s claim, reassigning to %s", wid, new_owner_id)
+            logger.info(
+                "PTY override: revoking %s claim, reassigning to %s", wid, new_owner_id
+            )
             ws.transcript_path = ""
             ws.session_id = ""
             break

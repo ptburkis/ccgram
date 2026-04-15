@@ -138,7 +138,7 @@ async def _enhance_with_llm_summary(
                 await enqueue_status_update(
                     bot, user_id, window_id, enhanced, thread_id=thread_id
                 )
-    except RuntimeError, OSError, ValueError:
+    except (RuntimeError, OSError, ValueError):
         logger.debug("LLM summary enhancement failed", exc_info=True)
 
 
@@ -537,7 +537,7 @@ async def dispatch_hook_event(event: HookEvent, bot: Bot) -> None:
                 wid = _window_id_from_key(event.window_key)
                 if wid:
                     mon.record_hook_activity(wid)
-        except ImportError, AttributeError:
+        except (ImportError, AttributeError):
             pass
 
     match event.event_type:
