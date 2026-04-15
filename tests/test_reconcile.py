@@ -141,6 +141,30 @@ async def test_orphan_topic_manual_review(tmp_path):
     assert issue.suggested_fix is None
 
 
+async def test_topic_1_never_flagged_as_orphan(tmp_path):
+    """Topic 1 (Forum General root) is always present and never bound."""
+    db = tmp_path / "state.db"
+    _setup_db(db)
+
+    report = await reconcile(
+        group_id=GROUP,
+        db_path=db,
+        tmux_fetcher=lambda: _tmux([]),
+        topic_fetcher=lambda gid: _topics(
+            [make_topic(1, "General"), make_topic(99, "unbound-topic")]
+        ),
+        session_identity_fetcher=lambda: _identity({}),
+    )
+    # Only topic 99 should flag as orphan; topic 1 is filtered.
+    assert all(
+        "topic 1 " not in i.detail and "topic 1(" not in i.detail
+        for i in report.issues
+    )
+    orphans = [i for i in report.issues if i.kind == "orphan_topic"]
+    assert len(orphans) == 1
+    assert "99" in orphans[0].detail
+
+
 async def test_orphan_binding_topic_gone(tmp_path):
     db = tmp_path / "state.db"
     _setup_db(db)

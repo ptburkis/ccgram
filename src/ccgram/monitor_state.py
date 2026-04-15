@@ -53,7 +53,13 @@ class MonitorState:
     _dirty: bool = field(default=False, repr=False)
 
     def load(self) -> None:
-        """Load state from file."""
+        """Load state from file.
+
+        # TODO: still legacy — see Phase 4 follow-up (retirement timeline in
+        # docs/plans/state-unification-runbook.md). Monitor state is mirrored
+        # to DB user_prefs scope='monitor' by the migration; this reader
+        # should prefer it DB-first once the shadow-write window closes.
+        """
         if not self.state_file.exists():
             logger.debug("State file does not exist: %s", self.state_file)
             return

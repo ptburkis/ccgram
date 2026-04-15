@@ -198,6 +198,9 @@ def _check_orphan_topics(
     bound_ids = {b.topic_id for b in bindings if b.group_id == group_id}
     issues: list[ReconcileIssue] = []
     for topic in live_topics:
+        # Topic 1 is the Forum "General" root — always present, never bound.
+        if topic.topic_id == 1:
+            continue
         if topic.topic_id not in bound_ids:
             issues.append(
                 ReconcileIssue(

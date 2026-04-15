@@ -459,6 +459,13 @@ class TestMigration:
         assert len(bindings) == 1
         assert any("DUPLICATE" in r.message for r in caplog.records)
 
+    def test_migration_topic_binding_uses_real_chat_id(self, migrated_db):
+        with store.connect(migrated_db) as c:
+            bindings = store.list_topic_bindings(c)
+        assert len(bindings) >= 1
+        assert bindings[0].group_id == 9876543210
+        assert bindings[0].topic_id == 10
+
     def test_migration_dry_run_writes_nothing(self, tmp_path, mig):
         db_path = tmp_path / "dry.db"
         mig.migrate(FIXTURES, db_path, dry_run=True, verbose=False)

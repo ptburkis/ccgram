@@ -168,3 +168,45 @@ The legacy JSON paths in Chunks E handlers are preserved as shadow writes, so th
 2. **Topic 1 (General) should be filtered** from `orphan_topic` classification — it's the forum root, always present, never bound.
 3. **systemd `ExecStartPre=claude-hub heal`** is harmless now (heal is a no-op stub) but the line is misleading. Low priority: clean up on next systemd edit.
 4. **Plaintext sudo password** `orchard32` in `~/ccgram-dashboard/health-check.sh` — rotate and move to env var.
+
+---
+
+## Legacy file retirement timeline
+
+Shadow writes to `session_map.json`, `state.json`, `target-state.json`,
+`monitor_state.json` remain in place for one release cycle after Phase 4
+ships, for rollback safety.
+
+**Status after Chunk H:**
+
+- Chunk H shipped docs (`ARCHITECTURE.md`), migration-script `group_id`
+  fix, reconcile topic-1 filter, integration test, and TODO markers on
+  the three startup loaders.
+- The read-flip itself (startup loaders preferring DB, falling back to
+  JSON with a WARNING) was **deferred** — the file-by-file refactor
+  exceeded the Opus small-edit threshold and a delegated Sonnet run hit
+  a budget guardrail. Follow-up task below.
+
+**Removal criteria:**
+
+- Phase 4 (Chunk H) follow-up: `_load_state` / `load_session_map` /
+  `MonitorState.load` refactored to DB-first, JSON-fallback with
+  WARNING. (See TODO comments at `session.py`, `session_map.py`,
+  `monitor_state.py`.)
+- Daemon runs 7 consecutive days with:
+  - no watchdog restarts,
+  - no reconcile `manual_review` issues,
+  - no `"falling back to legacy ... JSON"` WARNINGs in logs.
+
+Once both criteria hold, open a follow-up PR to delete the JSON write
+paths in:
+
+- `src/ccgram/session.py` (`_save_state`, `StatePersistence` wiring)
+- `src/ccgram/session_map.py` (`save_session_map`)
+- `src/ccgram/monitor_state.py` (`save_monitor_state`)
+- `src/ccgram/hook.py` (`session_map.json` update on SessionStart)
+
+Downstream CLI/debug utilities that currently read these files
+(`doctor_cmd.py`, `msg_cmd.py`, `msg_discovery.py`, `status_cmd.py`)
+should migrate to `store.*` lookups in the same PR.
+

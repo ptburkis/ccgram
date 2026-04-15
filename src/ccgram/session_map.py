@@ -97,6 +97,11 @@ class SessionMapSync:
         with "emdash-") are both processed. Emdash windows are marked as external.
         Also cleans up window_states entries not in current session_map.
         Updates window_display_names from the "window_name" field in values.
+
+        # TODO: still legacy — see Phase 4 follow-up.
+        # DB (store.list_sessions) mirrors this data via Chunk E shadow writes;
+        # once retirement criteria in the runbook hold, this loader should be
+        # replaced by a store.* lookup keyed on session_id rather than window_id.
         """
         if not config.session_map_file.exists():
             return

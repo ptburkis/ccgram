@@ -220,6 +220,14 @@ class SessionManager:
 
         Detects old-format state (window_name keys without '@' prefix) and
         marks for migration on next startup re-resolution.
+
+        # TODO: still legacy — see Phase 4 follow-up.
+        # The DB (store.list_sessions + store.list_topic_bindings) is now the
+        # authoritative source for session/binding identity. Shadow writes to
+        # state.json remain for rollback safety until the retirement timeline
+        # in docs/plans/state-unification-runbook.md completes. When they go,
+        # this loader should prefer the DB and fall back to JSON only with a
+        # WARNING log on first boot.
         """
         state = self._persistence.load()
         if not state:

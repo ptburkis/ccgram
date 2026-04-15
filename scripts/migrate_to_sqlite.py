@@ -127,23 +127,30 @@ def _migrate_topic_bindings(  # noqa: C901
     conn,
     thread_bindings: dict | None,
     window_display_names: dict | None,
+    group_chat_ids: dict | None,
     verbose: bool,
 ) -> dict[str, int]:
-    """Populate ``topic_bindings`` from state.json thread_bindings."""
+    """Populate ``topic_bindings`` from state.json thread_bindings.
+
+    The outer key in thread_bindings is a Telegram user_id, *not* the group
+    chat_id.  The real group_id (negative chat_id) lives in group_chat_ids
+    under the composite key ``"{user_id}:{topic_id}"``.
+    """
     counts = {"inserted": 0, "skipped_no_session": 0, "skipped_duplicate": 0}
     if not thread_bindings:
         return counts
 
     display_names = window_display_names or {}
+    chat_ids = group_chat_ids or {}
     claimed: dict[str, tuple[int, int]] = {}
 
     for group_id_str, topics in thread_bindings.items():
         if not isinstance(topics, dict):
             continue
         try:
-            group_id = int(group_id_str)
+            user_id = int(group_id_str)
         except (ValueError, TypeError):
-            logger.warning("Skipping invalid group_id: %r", group_id_str)
+            logger.warning("Skipping invalid user_id key: %r", group_id_str)
             continue
 
         for topic_id_str, window_id in topics.items():
@@ -152,6 +159,18 @@ def _migrate_topic_bindings(  # noqa: C901
             except (ValueError, TypeError):
                 logger.warning("Skipping invalid topic_id: %r", topic_id_str)
                 continue
+
+            # Resolve real group_id (negative chat_id) from group_chat_ids map.
+            composite_key = f"{user_id}:{topic_id}"
+            raw_chat_id = chat_ids.get(composite_key)
+            if raw_chat_id is not None and isinstance(raw_chat_id, int):
+                group_id = raw_chat_id
+            else:
+                logger.warning(
+                    "group_chat_ids missing key %r — falling back to user_id %s",
+                    composite_key, user_id,
+                )
+                group_id = user_id
 
             session = store.get_session_by_window(conn, window_id)
             if session is None:
@@ -363,7 +382,11 @@ def migrate(source: Path, db: Path, dry_run: bool, verbose: bool) -> None:
     try:
         s_counts = _migrate_sessions(raw_conn, session_map, window_states, verbose)
         b_counts = _migrate_topic_bindings(
-            raw_conn, thread_bindings, window_display_names, verbose
+            raw_conn,
+            thread_bindings,
+            window_display_names,
+            state_data.get("group_chat_ids") if state_data else None,
+            verbose,
         )
         c_counts = _migrate_crons(raw_conn, crons_data, verbose)
         h_counts = _migrate_heartbeats(raw_conn, health_state, verbose)
