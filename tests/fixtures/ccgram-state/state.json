@@ -1,0 +1,24 @@
+{
+  "window_states": {
+    "@1": {"session_id": "aaa00000-0000-0000-0000-000000000001", "cwd": "/home/user/project-alpha", "provider_name": "claude"},
+    "@2": {"session_id": "bbb00000-0000-0000-0000-000000000002", "cwd": "/home/user/project-beta", "provider_name": "codex"}
+  },
+  "thread_bindings": {
+    "100": {
+      "10": "@1"
+    }
+  },
+  "window_display_names": {
+    "@1": "alpha",
+    "@2": "beta"
+  },
+  "group_chat_ids": {
+    "100:10": 9876543210
+  },
+  "user_window_offsets": {
+    "100": {"@1": 42}
+  },
+  "user_dir_favorites": {
+    "100": ["/home/user/project-alpha", "/home/user/project-beta"]
+  }
+}

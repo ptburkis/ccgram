@@ -1,0 +1,12 @@
+{
+  "saved_at": "2026-04-15T09:00:00+00:00",
+  "sessions": [
+    {
+      "window_id": "@1",
+      "window_name": "alpha",
+      "provider": "claude",
+      "cwd": "/home/user/project-alpha",
+      "pane_pid": 12345
+    }
+  ]
+}

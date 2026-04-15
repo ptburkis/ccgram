@@ -1,0 +1,10 @@
+{
+  "tracked_sessions": {
+    "aaa00000-0000-0000-0000-000000000001": {
+      "session_id": "aaa00000-0000-0000-0000-000000000001",
+      "file_path": "/home/user/.claude/projects/alpha/aaa00000.jsonl",
+      "last_byte_offset": 512
+    }
+  },
+  "events_offset": 0
+}

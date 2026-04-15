@@ -1,0 +1,16 @@
+{
+  "ccgram:@1": {
+    "session_id": "aaa00000-0000-0000-0000-000000000001",
+    "cwd": "/home/user/project-alpha",
+    "window_name": "alpha",
+    "transcript_path": "/home/user/.claude/projects/alpha/aaa00000.jsonl",
+    "provider_name": "claude"
+  },
+  "ccgram:@2": {
+    "session_id": "bbb00000-0000-0000-0000-000000000002",
+    "cwd": "/home/user/project-beta",
+    "window_name": "beta",
+    "transcript_path": "/home/user/.claude/projects/beta/bbb00000.jsonl",
+    "provider_name": "codex"
+  }
+}

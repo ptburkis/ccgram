@@ -1,0 +1,12 @@
+[
+  {
+    "id": 1234567890,
+    "name": "Nightly Sync",
+    "window_name": "alpha",
+    "schedule": "0 2 * * *",
+    "message": "Run nightly sync",
+    "enabled": true,
+    "last_run": "2026-04-14T02:00:00+00:00",
+    "created": "2026-01-01T00:00:00+00:00"
+  }
+]
