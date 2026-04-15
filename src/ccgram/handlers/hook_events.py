@@ -73,8 +73,7 @@ async def _handle_notification(event: HookEvent, bot: Bot) -> None:
         # Empty tool_name = housekeeping notification, not a real interactive
         # prompt. Skip in summary mode to avoid phantom UI captures.
         all_summary = all(
-            session_manager.get_notification_mode(wid) != "all"
-            for _, _, wid in users
+            session_manager.get_notification_mode(wid) != "all" for _, _, wid in users
         )
         if all_summary:
             return
@@ -139,7 +138,7 @@ async def _enhance_with_llm_summary(
                 await enqueue_status_update(
                     bot, user_id, window_id, enhanced, thread_id=thread_id
                 )
-    except (RuntimeError, OSError, ValueError):
+    except RuntimeError, OSError, ValueError:
         logger.debug("LLM summary enhancement failed", exc_info=True)
 
 
@@ -194,7 +193,11 @@ async def _handle_stop(event: HookEvent, bot: Bot) -> None:
 
             asyncio.create_task(
                 _enhance_with_llm_summary(
-                    bot, users, first_window_id, transcript_path, num_turns,
+                    bot,
+                    users,
+                    first_window_id,
+                    transcript_path,
+                    num_turns,
                     session_id=event.session_id,
                 )
             )
@@ -205,14 +208,18 @@ async def _handle_stop(event: HookEvent, bot: Bot) -> None:
 # Both can coexist: "name 🐚 ⚡". Order: 🐚 first, then ⚡.
 
 _SUBAGENT_SUFFIX = " \u26a1"  # ⚡
-_BG_WORK_SUFFIX_EXT = " \U0001f41a"  # 🐚 — owned by polling_coordinator, stripped here too
+_BG_WORK_SUFFIX_EXT = (
+    " \U0001f41a"  # 🐚 — owned by polling_coordinator, stripped here too
+)
 
 
 def _strip_both_suffixes(name: str) -> str:
-    """Strip both 🐚 and ⚡ suffixes to get the clean base name."""
+    """Strip 🐚, ⚡, and [H/M/L] suffixes to get the clean base name."""
     result = name.rstrip()
     for suffix in (_SUBAGENT_SUFFIX.strip(), _BG_WORK_SUFFIX_EXT.strip()):
         result = result.removesuffix(suffix).rstrip()
+    for effort_sfx in ("[H]", "[M]", "[L]"):
+        result = result.removesuffix(effort_sfx).rstrip()
     return result
 
 
@@ -246,10 +253,10 @@ def clear_subagents(window_id: str) -> None:
     _active_subagents.pop(window_id, None)
 
 
-
 async def _apply_subagent_suffix(bot: Bot, users: list, *, add: bool) -> None:
     """Add/remove ⚡ suffix; preserves 🐚 if present. Order: 🐚 then ⚡."""
     from telegram.error import TelegramError as _TelegramError
+
     for user_id, thread_id, window_id in users:
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
         if not chat_id:
@@ -264,7 +271,9 @@ async def _apply_subagent_suffix(bot: Bot, users: list, *, add: bool) -> None:
             continue
         try:
             await bot.edit_forum_topic(
-                chat_id=chat_id, message_thread_id=thread_id, name=new_name,
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                name=new_name,
             )
             session_manager.set_display_name(window_id, new_name)
             logger.debug(
@@ -495,13 +504,15 @@ async def _handle_task_completed(event: HookEvent, bot: Bot) -> None:
 # housekeeping signal. Including it here would make every window look
 # "recently active" permanently, causing the typing indicator to fire
 # on ALL topics even when they're idle.
-_BUSY_HOOK_EVENTS: frozenset[str] = frozenset({
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "SubagentStart",
-    "PermissionRequest",
-})
+_BUSY_HOOK_EVENTS: frozenset[str] = frozenset(
+    {
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "SubagentStart",
+        "PermissionRequest",
+    }
+)
 
 
 def _window_id_from_key(window_key: str) -> str:
@@ -520,12 +531,13 @@ async def dispatch_hook_event(event: HookEvent, bot: Bot) -> None:
     if event.event_type in _BUSY_HOOK_EVENTS:
         try:
             from ..session_monitor import get_active_monitor
+
             mon = get_active_monitor()
             if mon is not None:
                 wid = _window_id_from_key(event.window_key)
                 if wid:
                     mon.record_hook_activity(wid)
-        except (ImportError, AttributeError):
+        except ImportError, AttributeError:
             pass
 
     match event.event_type:

@@ -112,9 +112,36 @@ _bg_work_changed_at: dict[str, float] = {}
 _bg_work_detected: dict[str, bool] = {}
 
 
+# ── Effort indicator topic suffix [H/M/L] ───────────────────────────────
+#
+# Parses Claude Code's TUI footer for the current effort symbol:
+#   ○ = low → [L]   ◐ = medium → [M]   ● = high → [H]
+# Suffix is appended AFTER any 🐚/⚡ suffixes so the order is:
+#   "project-name 🐚 ⚡ [H]"
+#
+# Debounced at _EFFORT_DEBOUNCE_SECS to avoid flicker.
+
+_EFFORT_SUFFIX_L = " [L]"
+_EFFORT_SUFFIX_M = " [M]"
+_EFFORT_SUFFIX_H = " [H]"
+_EFFORT_DEBOUNCE_SECS = 5.0
+_EFFORT_STATE_FILE = Path.home() / ".ccgram" / "effort_shown.json"
+_RE_EFFORT = _re.compile(r"([○●◐])\s+(low|medium|high)\b", _re.IGNORECASE)
+_EFFORT_CHAR_MAP = {"○": "L", "◐": "M", "●": "H"}
+_EFFORT_SUFFIX_MAP = {"L": " [L]", "M": " [M]", "H": " [H]"}
+
+# Per-window: what effort level is currently shown in topic name? ('H'|'M'|'L'|None)
+_effort_shown: dict[str, str | None] = {}
+# Per-window: what effort level was last detected from pane?
+_effort_detected: dict[str, str | None] = {}
+# Per-window: when did the detected effort level last change? (monotonic)
+_effort_changed_at: dict[str, float] = {}
+
+
 def _save_bg_work_state() -> None:
     try:
         import json
+
         _BG_WORK_STATE_FILE.write_text(json.dumps(_bg_work_shown))
     except OSError:
         pass
@@ -124,9 +151,30 @@ def _load_bg_work_state() -> None:
     global _bg_work_shown
     try:
         import json
+
         if _BG_WORK_STATE_FILE.exists():
             _bg_work_shown = json.loads(_BG_WORK_STATE_FILE.read_text())
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
+        pass
+
+
+def _save_effort_state() -> None:
+    try:
+        import json
+
+        _EFFORT_STATE_FILE.write_text(json.dumps(_effort_shown))
+    except OSError:
+        pass
+
+
+def _load_effort_state() -> None:
+    global _effort_shown
+    try:
+        import json
+
+        if _EFFORT_STATE_FILE.exists():
+            _effort_shown = json.loads(_EFFORT_STATE_FILE.read_text())
+    except (OSError, ValueError):
         pass
 
 
@@ -150,16 +198,41 @@ def _parse_bg_work_counts(pane_text: str) -> tuple[int, int]:
     return agents, tasks
 
 
-def _strip_bg_suffix(name: str) -> str:
-    """Remove 🐚 and ⚡ suffixes from a topic name.
+def _parse_effort(pane_text: str) -> str | None:
+    """Extract effort level from Claude Code's TUI footer.
 
-    Both bg-work (🐚) and subagent (⚡) suffixes may be present simultaneously.
-    This strips both so callers get a clean base name to reattach desired
-    suffixes. Order of removal doesn't matter — we strip iteratively.
+    Scans only the last 5 lines (the status bar area).
+    Returns 'H', 'M', 'L', or None.
+    """
+    tail = _RE_ANSI_STRIP.sub("", "\n".join(pane_text.split("\n")[-5:]))
+    match = _RE_EFFORT.search(tail)
+    if not match:
+        return None
+    char = match.group(1)
+    return _EFFORT_CHAR_MAP.get(char)
+
+
+def _strip_effort_suffix(name: str) -> str:
+    """Remove any [H], [M], or [L] effort suffix from the end of a topic name."""
+    result = name.rstrip()
+    for suffix in ("[H]", "[M]", "[L]"):
+        result = result.removesuffix(suffix).rstrip()
+    return result
+
+
+def _strip_bg_suffix(name: str) -> str:
+    """Remove 🐚, ⚡, and [H/M/L] suffixes from a topic name.
+
+    bg-work (🐚), subagent (⚡), and effort ([H/M/L]) suffixes may be present
+    simultaneously. This strips all so callers get a clean base name to
+    reattach desired suffixes. Order of removal doesn't matter — we strip
+    iteratively.
     """
     result = name.rstrip()
     for suffix in (_SUBAGENT_SUFFIX_EXT.strip(), _BG_WORK_SUFFIX.strip()):
         result = result.removesuffix(suffix).rstrip()
+    for effort_sfx in ("[H]", "[M]", "[L]"):
+        result = result.removesuffix(effort_sfx).rstrip()
     return result
 
 
@@ -201,7 +274,11 @@ async def _check_background_work(
     # Time to rename
     chat_id = thread_router.resolve_chat_id(
         next(
-            (uid for uid, tid, wid in thread_router.iter_thread_bindings() if wid == window_id),
+            (
+                uid
+                for uid, tid, wid in thread_router.iter_thread_bindings()
+                if wid == window_id
+            ),
             0,
         ),
         thread_id,
@@ -233,6 +310,82 @@ async def _check_background_work(
         session_manager.set_display_name(window_id, new_name)
         logger.debug(
             "Background work indicator: %s -> %r",
+            window_id,
+            new_name,
+        )
+    except TelegramError:
+        pass  # non-critical, silently degrade
+
+
+async def _check_effort_suffix(
+    bot: Bot,
+    window_id: str,
+    thread_id: int | None,
+    pane_text: str,
+) -> None:
+    """Check the effort level and update topic name suffix if needed.
+
+    Called from update_status_message on every poll cycle. Uses debouncing
+    to avoid rapid renames.
+    """
+    if thread_id is None:
+        return
+
+    detected = _parse_effort(pane_text)
+
+    now = time.monotonic()
+    prev_detected = _effort_detected.get(window_id, "UNSET")
+
+    if prev_detected == "UNSET" or prev_detected != detected:
+        _effort_detected[window_id] = detected
+        _effort_changed_at[window_id] = now
+        return  # start debounce timer
+
+    changed_at = _effort_changed_at.get(window_id, now)
+    if (now - changed_at) < _EFFORT_DEBOUNCE_SECS:
+        return  # still debouncing
+
+    currently_shown = _effort_shown.get(window_id)
+    if detected == currently_shown:
+        return  # already reflected — no-op
+
+    chat_id = thread_router.resolve_chat_id(
+        next(
+            (
+                uid
+                for uid, tid, wid in thread_router.iter_thread_bindings()
+                if wid == window_id
+            ),
+            0,
+        ),
+        thread_id,
+    )
+    if not chat_id:
+        return
+
+    display = thread_router.get_display_name(window_id) or ""
+    # Strip existing effort suffix, preserve 🐚 and ⚡
+    clean_name = _strip_effort_suffix(display)
+
+    if detected:
+        new_name = f"{clean_name}{_EFFORT_SUFFIX_MAP[detected]}"
+    else:
+        new_name = clean_name
+
+    if new_name == display:
+        return
+
+    try:
+        await bot.edit_forum_topic(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            name=new_name,
+        )
+        _effort_shown[window_id] = detected
+        _save_effort_state()
+        session_manager.set_display_name(window_id, new_name)
+        logger.debug(
+            "Effort indicator: %s -> %r",
             window_id,
             new_name,
         )
@@ -597,6 +750,10 @@ async def update_status_message(
         await _check_background_work(bot, window_id, thread_id, pane_text or "")
     except Exception:
         pass  # non-critical — never let this break the main poll
+    try:
+        await _check_effort_suffix(bot, window_id, thread_id, pane_text or "")
+    except Exception:
+        pass
     if not pane_text:
         return
 
@@ -644,6 +801,19 @@ async def update_status_message(
             emoji = status_emoji_prefix(status.raw_text)
             status_line = f"{emoji} {status.raw_text}"
 
+    if status_line:
+        try:
+            from ..model_detector import get_current_model
+
+            window_state = session_manager.get_window_state(window_id)
+            transcript_path = window_state.transcript_path if window_state else None
+            if transcript_path:
+                model_label = get_current_model(transcript_path)
+                if model_label:
+                    status_line = f"{status_line} \u00b7 {model_label}"
+        except Exception:
+            pass
+
     notif_mode = session_manager.get_notification_mode(window_id)
 
     if status_line:
@@ -677,24 +847,26 @@ async def update_status_message(
         )
 
 
-
 # ── Startup cleanup ──────────────────────────────────────────────────────
 
 
 async def _clear_stale_bg_indicators(bot: Bot) -> None:
-    """Strip stale 🐚 suffixes from topic names left over from a previous run.
+    """Strip stale 🐚 suffixes and [H/M/L] effort suffixes left over from a previous run.
 
-    On restart _bg_work_shown resets to {}, so any topic that still carries
-    the suffix from a previous session would never be cleaned up.  We load
-    the persisted state, then iterate all window_ids where it was True and
-    rename eagerly.
+    On restart _bg_work_shown and _effort_shown reset to {}, so any topic that
+    still carries the suffix from a previous session would never be cleaned up.
+    We load the persisted state, then iterate all window_ids and rename eagerly.
     """
     _load_bg_work_state()
+    _load_effort_state()
     for user_id, thread_id, window_id in list(thread_router.iter_thread_bindings()):
-        if not _bg_work_shown.get(window_id, False):
+        has_bg = _bg_work_shown.get(window_id, False)
+        has_effort = bool(_effort_shown.get(window_id))
+        if not has_bg and not has_effort:
             continue
         display = thread_router.get_display_name(window_id) or ""
         clean_name = _strip_bg_suffix(display)
+        clean_name = _strip_effort_suffix(clean_name)
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
         if not chat_id:
             continue
@@ -706,19 +878,22 @@ async def _clear_stale_bg_indicators(bot: Bot) -> None:
             )
             session_manager.set_display_name(window_id, clean_name)
             logger.info(
-                "Cleared stale bg-work indicator for %s: %r -> %r",
+                "Cleared stale bg-work/effort indicator for %s: %r -> %r",
                 window_id,
                 display,
                 clean_name,
             )
         except TelegramError as exc:
             logger.warning(
-                "Could not clear stale bg-work indicator for %s: %s",
+                "Could not clear stale bg-work/effort indicator for %s: %s",
                 window_id,
                 exc,
             )
     _bg_work_shown.update({k: False for k in _bg_work_shown})
     _save_bg_work_state()
+    _effort_shown.update({k: None for k in _effort_shown})
+    _save_effort_state()
+
 
 # ── Main loop ─────────────────────────────────────────────────────────────
 
