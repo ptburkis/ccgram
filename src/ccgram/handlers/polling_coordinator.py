@@ -317,6 +317,62 @@ async def _check_background_work(
         pass  # non-critical, silently degrade
 
 
+async def _apply_effort_suffix(
+    bot: Bot,
+    window_id: str,
+    thread_id: int,
+    level: str | None,
+) -> None:
+    """Apply (or remove) an effort suffix on a Telegram topic.
+
+    Resolves the chat_id, strips any existing effort suffix, appends the new
+    one (if level is not None), calls edit_forum_topic, and updates local state.
+    Called by _check_effort_suffix (poll-detected) and the /effort command.
+    """
+    chat_id = thread_router.resolve_chat_id(
+        next(
+            (
+                uid
+                for uid, tid, wid in thread_router.iter_thread_bindings()
+                if wid == window_id
+            ),
+            0,
+        ),
+        thread_id,
+    )
+    if not chat_id:
+        return
+
+    display = thread_router.get_display_name(window_id) or ""
+    clean_name = _strip_effort_suffix(display)
+
+    if level:
+        new_name = f"{clean_name}{_EFFORT_SUFFIX_MAP[level]}"
+    else:
+        new_name = clean_name
+
+    if new_name == display:
+        _effort_shown[window_id] = level
+        return
+
+    try:
+        await bot.edit_forum_topic(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            name=new_name,
+        )
+        _effort_shown[window_id] = level
+        _save_effort_state()
+        session_manager.set_display_name(window_id, new_name)
+        logger.debug(
+            "Effort indicator: %s -> %r",
+            window_id,
+            new_name,
+        )
+    except TelegramError:
+        pass  # non-critical, silently degrade
+
+
 async def _check_effort_suffix(
     bot: Bot,
     window_id: str,
@@ -326,12 +382,17 @@ async def _check_effort_suffix(
     """Check the effort level and update topic name suffix if needed.
 
     Called from update_status_message on every poll cycle. Uses debouncing
-    to avoid rapid renames.
+    to avoid rapid renames. If the indicator disappears (detected is None),
+    the suffix is left in place (sticky badge).
     """
     if thread_id is None:
         return
 
     detected = _parse_effort(pane_text)
+
+    # Sticky: if the indicator is gone, do nothing — keep the last suffix.
+    if detected is None:
+        return
 
     now = time.monotonic()
     prev_detected = _effort_detected.get(window_id, "UNSET")
@@ -349,48 +410,7 @@ async def _check_effort_suffix(
     if detected == currently_shown:
         return  # already reflected — no-op
 
-    chat_id = thread_router.resolve_chat_id(
-        next(
-            (
-                uid
-                for uid, tid, wid in thread_router.iter_thread_bindings()
-                if wid == window_id
-            ),
-            0,
-        ),
-        thread_id,
-    )
-    if not chat_id:
-        return
-
-    display = thread_router.get_display_name(window_id) or ""
-    # Strip existing effort suffix, preserve 🐚 and ⚡
-    clean_name = _strip_effort_suffix(display)
-
-    if detected:
-        new_name = f"{clean_name}{_EFFORT_SUFFIX_MAP[detected]}"
-    else:
-        new_name = clean_name
-
-    if new_name == display:
-        return
-
-    try:
-        await bot.edit_forum_topic(
-            chat_id=chat_id,
-            message_thread_id=thread_id,
-            name=new_name,
-        )
-        _effort_shown[window_id] = detected
-        _save_effort_state()
-        session_manager.set_display_name(window_id, new_name)
-        logger.debug(
-            "Effort indicator: %s -> %r",
-            window_id,
-            new_name,
-        )
-    except TelegramError:
-        pass  # non-critical, silently degrade
+    await _apply_effort_suffix(bot, window_id, thread_id, detected)
 
 
 # ── Typing throttle ─────────────────────────────────────────────────────
@@ -851,11 +871,12 @@ async def update_status_message(
 
 
 async def _clear_stale_bg_indicators(bot: Bot) -> None:
-    """Strip stale 🐚 suffixes and [H/M/L] effort suffixes left over from a previous run.
+    """Clear stale 🐚 bg-work suffixes and re-apply persisted effort suffixes on startup.
 
-    On restart _bg_work_shown and _effort_shown reset to {}, so any topic that
-    still carries the suffix from a previous session would never be cleaned up.
-    We load the persisted state, then iterate all window_ids and rename eagerly.
+    On restart _bg_work_shown and _effort_shown reset to {}, so we load the
+    persisted state and reconcile each topic:
+      - bg-work (🐚): clear it (the work is no longer running)
+      - effort ([H/M/L]): re-apply it (the level is still valid — sticky badge)
     """
     _load_bg_work_state()
     _load_effort_state()
@@ -865,34 +886,43 @@ async def _clear_stale_bg_indicators(bot: Bot) -> None:
         if not has_bg and not has_effort:
             continue
         display = thread_router.get_display_name(window_id) or ""
+        # Strip bg suffix (stale on restart); effort suffix handled below
         clean_name = _strip_bg_suffix(display)
-        clean_name = _strip_effort_suffix(clean_name)
+        # Re-add effort suffix if persisted (it's sticky — don't remove it)
+        effort_level = _effort_shown.get(window_id)
+        if effort_level:
+            clean_name = _strip_effort_suffix(clean_name)
+            new_name = f"{clean_name.rstrip()}{_EFFORT_SUFFIX_MAP[effort_level]}"
+        else:
+            clean_name = _strip_effort_suffix(clean_name)
+            new_name = clean_name
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
         if not chat_id:
             continue
+        if new_name == display and not has_bg:
+            continue  # nothing to do
         try:
             await bot.edit_forum_topic(
                 chat_id=chat_id,
                 message_thread_id=thread_id,
-                name=clean_name,
+                name=new_name,
             )
-            session_manager.set_display_name(window_id, clean_name)
+            session_manager.set_display_name(window_id, new_name)
             logger.info(
-                "Cleared stale bg-work/effort indicator for %s: %r -> %r",
+                "Startup indicator reconcile for %s: %r -> %r",
                 window_id,
                 display,
-                clean_name,
+                new_name,
             )
         except TelegramError as exc:
             logger.warning(
-                "Could not clear stale bg-work/effort indicator for %s: %s",
+                "Could not reconcile startup indicator for %s: %s",
                 window_id,
                 exc,
             )
     _bg_work_shown.update({k: False for k in _bg_work_shown})
     _save_bg_work_state()
-    _effort_shown.update({k: None for k in _effort_shown})
-    _save_effort_state()
+    # effort_shown is preserved as-is (sticky)
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────

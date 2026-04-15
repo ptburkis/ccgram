@@ -1305,6 +1305,52 @@ async def usage_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> 
     await safe_reply(update.message, "\n".join(lines))
 
 
+async def effort_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show or change the effort level for the window bound to this topic."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id) or not update.message:
+        return
+
+    message = update.message
+    chat_id = message.chat_id
+    thread_id = message.message_thread_id
+
+    if thread_id is None:
+        await safe_reply(message, "⚠️ /effort only works inside a topic")
+        return
+
+    window_id = thread_router.get_window_for_chat_thread(chat_id, thread_id)
+    if not window_id:
+        await safe_reply(message, "⚠️ No window bound to this topic")
+        return
+
+    args = context.args or []
+    if not args:
+        # Show current stored level
+        from .handlers.polling_coordinator import _effort_shown
+        current = _effort_shown.get(window_id)
+        labels = {"H": "high", "M": "medium", "L": "low"}
+        label = labels.get(current, "not yet set") if current else "not yet set"
+        await safe_reply(message, f"Effort for {window_id}: **{label}**\nUsage: /effort <high|medium|low|auto>")
+        return
+
+    level = args[0].lower()
+    if level == "med":
+        level = "medium"
+    if level not in ("high", "medium", "low", "auto"):
+        await safe_reply(message, "⚠️ Invalid level. Use: high, medium, low, or auto")
+        return
+
+    # Inject the command into the tmux window
+    from .tmux_manager import send_to_window
+    cmd = f"/effort {level}"
+    success, err = await send_to_window(window_id, cmd)
+    if success:
+        await safe_reply(message, f"✓ Sent: `{cmd}`")
+    else:
+        await safe_reply(message, f"⚠️ Failed: {err}")
+
+
 def create_bot() -> Application:
     # Suppress PTBUserWarning about JobQueue (we intentionally don't use it for core tasks)
     import warnings
@@ -1380,6 +1426,9 @@ def create_bot() -> Application:
     )
     application.add_handler(
         CommandHandler("usage", usage_command, filters=_group_filter)
+    )
+    application.add_handler(
+        CommandHandler("effort", effort_command, filters=_group_filter)
     )
     _load_callback_handlers()
     application.add_handler(CallbackQueryHandler(_dispatch_callback))
