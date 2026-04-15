@@ -238,49 +238,107 @@ async def test_directory_callbacks_shadow_write_failure_is_logged_not_raised(ccg
         )
 
 
-# ---- topic_orchestration shadow-write test ----------------------------------
+# ---- topic_orchestration: Phase 5 Chunk J tests ----------------------------
 
 
-async def test_topic_orchestration_create_topic_in_chat_shadow_write(ccgram_test_dir):
+async def test_topic_orchestration_unbound_no_hint_posts_alert(ccgram_test_dir, monkeypatch):
+    """Path A: unbound window with no topic_id hint => alert sent, no topic created."""
+    from ccgram.handlers import topic_orchestration
+
+    # Reset debounce state so the alert fires.
+    topic_orchestration._last_alert_sent.clear()
+
+    mock_bot = MagicMock()
+    mock_bot.send_message = AsyncMock()
+
+    with patch("ccgram.handlers.topic_orchestration.session_manager") as mock_sm:
+        mock_ws = MagicMock()
+        mock_ws.cwd = "/home/peter/myproject"
+        mock_ws.provider_name = "claude"
+        mock_sm.get_window_state.return_value = mock_ws
+
+        await topic_orchestration.create_topic_in_chat(
+            bot=mock_bot,
+            chat_id=-1001234567890,
+            window_id="@42",
+            topic_name="my-topic",
+        )
+
+    mock_bot.send_message.assert_awaited_once()
+    call_kwargs = mock_bot.send_message.call_args.kwargs
+    assert call_kwargs["chat_id"] == -1001234567890
+    assert "@42" in call_kwargs["text"]
+    assert "Suppressed auto-create" in call_kwargs["text"]
+    # No create_forum_topic call — topic creation is retired.
+    assert not hasattr(mock_bot, "create_forum_topic") or not mock_bot.create_forum_topic.called
+
+
+async def test_topic_orchestration_unbound_with_existing_topic_id_uses_create_session(ccgram_test_dir):
+    """Path B: unbound window + explicit existing_topic_id => create_session called, no forum topic created."""
     from ccgram.handlers import topic_orchestration
 
     create_session_mock = AsyncMock(return_value=None)
 
-    mock_topic = MagicMock()
-    mock_topic.message_thread_id = 77
-
     mock_bot = MagicMock()
-    mock_bot.create_forum_topic = AsyncMock(return_value=mock_topic)
+    mock_bot.create_forum_topic = AsyncMock()
 
-    # Auto-create is gated behind CCGRAM_ALLOW_AUTO_TOPIC during the state-
-    # unification live migration. Set the env var for this test so the shadow-
-    # write path is reachable.
-    import os as _os
-    _os.environ["CCGRAM_ALLOW_AUTO_TOPIC"] = "1"
-    try:
-        with (
-            patch.object(topic_orchestration, "_bind_topic_to_user"),
-            patch("ccgram.session_lifecycle.create_session", create_session_mock),
-            patch("ccgram.handlers.topic_orchestration.session_manager") as mock_sm,
-        ):
-            mock_ws = MagicMock()
-            mock_ws.cwd = "/home/peter/myproject"
-            mock_ws.provider_name = "claude"
-            mock_ws.approval_mode = "normal"
-            mock_sm.get_window_state.return_value = mock_ws
+    with (
+        patch("ccgram.session_lifecycle.create_session", create_session_mock),
+        patch("ccgram.handlers.topic_orchestration.session_manager") as mock_sm,
+    ):
+        mock_ws = MagicMock()
+        mock_ws.cwd = "/home/peter/myproject"
+        mock_ws.provider_name = "claude"
+        mock_ws.approval_mode = "normal"
+        mock_sm.get_window_state.return_value = mock_ws
 
-            await topic_orchestration.create_topic_in_chat(
-                bot=mock_bot,
-                chat_id=-1001234567890,
-                window_id="@42",
-                topic_name="my-topic",
-            )
-    finally:
-        _os.environ.pop("CCGRAM_ALLOW_AUTO_TOPIC", None)
+        await topic_orchestration.create_topic_in_chat(
+            bot=mock_bot,
+            chat_id=-1001234567890,
+            window_id="@42",
+            topic_name="my-topic",
+            existing_topic_id=77,
+        )
 
     create_session_mock.assert_awaited_once()
     call_kwargs = create_session_mock.call_args.kwargs
     assert call_kwargs["existing_topic_id"] == 77
+    assert call_kwargs["cwd"] == "/home/peter/myproject"
+    assert call_kwargs["agent"] == "claude"
+    mock_bot.create_forum_topic.assert_not_called()
+
+
+async def test_topic_orchestration_alert_debounce(ccgram_test_dir):
+    """Two alerts for the same window within 30 min => only one send_message call."""
+    from ccgram.handlers import topic_orchestration
+
+    # Reset debounce state.
+    topic_orchestration._last_alert_sent.clear()
+
+    mock_bot = MagicMock()
+    mock_bot.send_message = AsyncMock()
+
+    with patch("ccgram.handlers.topic_orchestration.session_manager") as mock_sm:
+        mock_ws = MagicMock()
+        mock_ws.cwd = "/home/peter/myproject"
+        mock_sm.get_window_state.return_value = mock_ws
+
+        # First call — should send.
+        await topic_orchestration.create_topic_in_chat(
+            bot=mock_bot,
+            chat_id=-1001234567890,
+            window_id="@42",
+            topic_name="my-topic",
+        )
+        # Second call — should be suppressed by debounce.
+        await topic_orchestration.create_topic_in_chat(
+            bot=mock_bot,
+            chat_id=-1001234567890,
+            window_id="@42",
+            topic_name="my-topic",
+        )
+
+    assert mock_bot.send_message.await_count == 1
 
 
 # ---- CLI smoke test ---------------------------------------------------------

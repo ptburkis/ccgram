@@ -1,12 +1,20 @@
-"""Auto-create Telegram forum topics for newly detected tmux windows.
+"""Handle unbound-window events by alerting the operator or reusing a known topic.
 
-Handles topic creation with flood-control backoff, provider auto-detection,
-and post-restart adoption of unbound windows.
+Auto-creation of Telegram forum topics is retired (Phase 5, Chunk J).  The only
+two things this module now does when a window has no binding:
 
-Core responsibilities:
-  - handle_new_window(): create a topic when a new tmux window appears
+  Path A — no topic hint: post a single operator alert to
+      ``settings.CCGRAM_ALERT_THREAD_ID`` (default 529, the james-claude-hub
+      topic).  Alerts are debounced per window_id (one per 30 minutes) so
+      noisy unbound windows don't spam the operator channel.
+
+  Path B — caller supplies ``existing_topic_id``: route through
+      ``session_lifecycle.create_session(existing_topic_id=...)`` so the
+      window gets bound on the canonical path without creating a new topic.
+
+Core responsibilities (retained):
+  - handle_new_window(): entry point from session_monitor
   - adopt_unbound_windows(): post-restart recovery of orphaned windows
-  - Rate-limited topic creation with per-chat exponential backoff
 """
 
 from __future__ import annotations
@@ -16,7 +24,6 @@ from pathlib import Path
 
 import structlog
 from telegram import Bot
-from telegram.error import RetryAfter, TelegramError
 
 from ..config import config
 from ..providers import (
@@ -31,21 +38,20 @@ from ..tmux_manager import tmux_manager
 
 logger = structlog.get_logger()
 
-# Per-chat backoff for auto topic creation after Telegram flood control.
-# chat_id -> monotonic timestamp when next attempt is allowed.
-_topic_create_retry_until: dict[int, float] = {}
-_TOPIC_CREATE_RETRY_BUFFER_SECONDS = 1
+# ---------------------------------------------------------------------------
+# Operator-alert debounce
+# One alert per window_id per _ALERT_DEBOUNCE_SECONDS (30 min).
+# Keyed on window_id; value is the monotonic timestamp of the last alert sent.
+# ---------------------------------------------------------------------------
+_ALERT_DEBOUNCE_SECONDS: int = 30 * 60
+_last_alert_sent: dict[str, float] = {}
 
-
-def clear_topic_create_retry(chat_id: int, _thread_id: int = 0) -> None:
-    """Clear topic creation retry backoff for this chat.
-
-    NOT registered in TopicStateRegistry — the backoff is self-managing:
-    entries expire via the time check in create_topic_in_chat() and are
-    cleared on successful topic creation.  Clearing on every topic teardown
-    would bypass Telegram's flood-control gate prematurely.
-    """
-    _topic_create_retry_until.pop(chat_id, None)
+_ALERT_TEMPLATE = (
+    "⚠️ Unbound window {window_id!r} ({window_name!r}, cwd={cwd!r}) emitted output.\n"
+    "Run `claude-hub reconcile` or "
+    "`claude-hub spawn --cwd \u2026 --topic \u2026 --agent \u2026 --group {chat_id}` to bind a session.\n"
+    "(Suppressed auto-create to prevent topic corruption.)"
+)
 
 
 def _is_window_already_bound(window_id: str) -> bool:
@@ -91,7 +97,7 @@ async def _auto_detect_provider(window_id: str) -> None:
 
 
 def collect_target_chats(window_id: str) -> set[int]:
-    """Collect unique group chat IDs for topic creation."""
+    """Collect unique group chat IDs for alert dispatch."""
     seen_chats: set[int] = set()
     for user_id, thread_id, _ in thread_router.iter_thread_bindings():
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
@@ -107,85 +113,42 @@ def collect_target_chats(window_id: str) -> set[int]:
         if config.group_id:
             seen_chats.add(config.group_id)
             logger.info(
-                "Cold-start: using CCGRAM_GROUP_ID=%d for auto-topic (window %s)",
+                "Cold-start: using CCGRAM_GROUP_ID=%d for alert (window %s)",
                 config.group_id,
                 window_id,
             )
         else:
             logger.debug(
-                "No group chats found for auto-topic creation (window %s)",
+                "No group chats found for unbound-window alert (window %s)",
                 window_id,
             )
 
     return seen_chats
 
 
-def _bind_topic_to_user(
-    thread_id: int, window_id: str, chat_id: int, topic_name: str
-) -> None:
-    """Bind a newly created topic to a user in the given chat."""
-    for user_id, tid, _ in thread_router.iter_thread_bindings():
-        if thread_router.resolve_chat_id(user_id, tid) == chat_id:
-            thread_router.bind_thread(
-                user_id, thread_id, window_id, window_name=topic_name
-            )
-            thread_router.set_group_chat_id(user_id, thread_id, chat_id)
-            return
-
-    if config.allowed_users:
-        first_user_id = next(iter(config.allowed_users))
-        thread_router.bind_thread(
-            first_user_id, thread_id, window_id, window_name=topic_name
-        )
-        thread_router.set_group_chat_id(first_user_id, thread_id, chat_id)
-
-
 async def create_topic_in_chat(
-    bot: Bot, chat_id: int, window_id: str, topic_name: str
+    bot: Bot,
+    chat_id: int,
+    window_id: str,
+    topic_name: str,
+    *,
+    existing_topic_id: int | None = None,
 ) -> None:
-    """Create a forum topic in one chat with backoff handling."""
-    retry_until = _topic_create_retry_until.get(chat_id, 0.0)
-    now = time.monotonic()
-    if now < retry_until:
-        wait_seconds = max(1, int(retry_until - now))
-        logger.debug(
-            "Skipping auto-topic creation for chat %d (window %s), "
-            "backoff active for %ss",
-            chat_id,
-            window_id,
-            wait_seconds,
-        )
-        return
+    """Handle an unbound window that emitted output.
 
-    # TEMPORARY KILL-SWITCH during state-unification live migration.
-    # Auto-create fires on every window output for windows without a binding,
-    # which produced dozens of duplicate topics during today's migration.
-    # Disabled until all windows are bound via `claude-hub spawn
-    # --existing-topic-id`; remove this guard (env var CCGRAM_ALLOW_AUTO_TOPIC)
-    # after the 7-day retirement soak per state-unification-runbook.md.
-    import os as _os
-    if not _os.environ.get("CCGRAM_ALLOW_AUTO_TOPIC"):
-        logger.warning(
-            "auto_create_topic_disabled window=%s chat=%d name=%r "
-            "(set CCGRAM_ALLOW_AUTO_TOPIC=1 to re-enable)",
-            window_id, chat_id, topic_name,
-        )
-        return
+    Path A (existing_topic_id is None):
+        Post a single operator alert to the configured alert thread, debounced
+        to one message per window per 30 minutes.  No topic is created.
 
-    try:
-        topic = await bot.create_forum_topic(chat_id=chat_id, name=topic_name)
-        _topic_create_retry_until.pop(chat_id, None)
-        logger.info(
-            "Auto-created topic '%s' (thread=%d) in chat %d for window %s",
-            topic_name,
-            topic.message_thread_id,
-            chat_id,
-            window_id,
-        )
-        _bind_topic_to_user(topic.message_thread_id, window_id, chat_id, topic_name)
-        # State unification shadow write.
+    Path B (existing_topic_id is not None):
+        Route through ``session_lifecycle.create_session(existing_topic_id=...)``
+        to bind the window to the pre-existing topic on the canonical path.
+    """
+    if existing_topic_id is not None:
+        # Path B — reuse a known topic via the canonical lifecycle.
         try:
             from ccgram import session_lifecycle as _sl
+
             ws = session_manager.get_window_state(window_id)
             cwd = ws.cwd or ""
             agent = ws.provider_name or "claude"
@@ -197,56 +160,72 @@ async def create_topic_in_chat(
                     agent=agent,
                     mode=mode,
                     group_id=chat_id,
-                    existing_topic_id=topic.message_thread_id,
+                    existing_topic_id=existing_topic_id,
                 )
-        except Exception as _exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "topic_orchestration: create_session shadow write failed: %s", _exc
+                "topic_orchestration: create_session (Path B) failed: %s", exc
             )
-    except RetryAfter as e:
-        retry_after_seconds = (
-            e.retry_after
-            if isinstance(e.retry_after, int)
-            else int(e.retry_after.total_seconds())
+        return
+
+    # Path A — no hint; alert the operator (debounced).
+    now = time.monotonic()
+    last_sent = _last_alert_sent.get(window_id, 0.0)
+    if now - last_sent < _ALERT_DEBOUNCE_SECONDS:
+        logger.debug(
+            "unbound_window_alert debounced window=%s (next in %.0fs)",
+            window_id,
+            _ALERT_DEBOUNCE_SECONDS - (now - last_sent),
         )
-        retry_after_seconds = max(1, retry_after_seconds)
-        _topic_create_retry_until[chat_id] = (
-            time.monotonic() + retry_after_seconds + _TOPIC_CREATE_RETRY_BUFFER_SECONDS
+        return
+
+    ws = session_manager.get_window_state(window_id)
+    cwd = ws.cwd or ""
+
+    alert_text = _ALERT_TEMPLATE.format(
+        window_id=window_id,
+        window_name=topic_name,
+        cwd=cwd,
+        chat_id=chat_id,
+    )
+
+    alert_thread_id = config.alert_thread_id
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=alert_text,
+            message_thread_id=alert_thread_id,
         )
+        _last_alert_sent[window_id] = now
         logger.warning(
-            "Flood control creating topic for window %s in chat %d, backing off %ss",
+            "unbound_window_alert_sent window=%s chat=%d thread=%d",
             window_id,
             chat_id,
-            retry_after_seconds,
+            alert_thread_id,
         )
-    except TelegramError:
-        logger.exception(
-            "Failed to create topic for window %s in chat %d",
-            window_id,
-            chat_id,
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "topic_orchestration: failed to send unbound-window alert: %s", exc
         )
 
 
 async def handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
-    """Create a Telegram forum topic for a newly detected tmux window.
+    """Handle a newly detected tmux window that has no topic binding.
 
-    Skips if the window is already bound to a topic. Creates one topic per
-    unique group chat, binds all users in that chat.
+    Skips if the window is already bound to a topic.  Skips web-terminal
+    mirror windows (transient; no canonical topic).
     """
-    # Defensive: never create topics for web-terminal grouped mirror sessions.
-    # These have qualified window_ids like "web-<name>-<uuid>:@N" and are
-    # transient mirrors of the canonical ccgram session windows. Auto-creating
-    # topics for them produces duplicate topics on every web-terminal connect.
+    # Defensive: never alert for web-terminal grouped mirror sessions.
     if ":" in event.window_id and event.window_id.split(":", 1)[0].startswith("web-"):
         logger.debug(
-            "Skipping topic creation for web-terminal mirror window %s",
+            "Skipping alert for web-terminal mirror window %s",
             event.window_id,
         )
         return
 
     if _is_window_already_bound(event.window_id):
         logger.debug(
-            "New window %s already bound, skipping topic creation", event.window_id
+            "New window %s already bound, skipping alert", event.window_id
         )
         return
 
@@ -273,3 +252,29 @@ async def adopt_unbound_windows(bot: Bot) -> None:
 
         await _adopt_orphaned_windows(bot, orphaned)
         logger.info("Startup: adopted %d unbound window(s)", len(orphaned))
+
+
+# ---------------------------------------------------------------------------
+# Compatibility shims — retained so callers that imported these names
+# (e.g. test_cleanup_gaps.py, TopicStateRegistry) continue to work without
+# changes during the Phase 5 soak period.
+# _topic_create_retry_until is now an alias for the alert debounce dict;
+# clear_topic_create_retry clears the entry for the given chat_id (window_id
+# in the new model, but chat_id is the legacy key convention used by callers).
+# ---------------------------------------------------------------------------
+
+_topic_create_retry_until: dict[int, float] = {}  # type: ignore[assignment]
+"""Legacy compat alias — the old per-chat flood-control backoff dict.
+
+Auto-create is retired; this dict is kept empty.  Callers that cleared it
+(e.g. TopicStateRegistry) continue to compile and run without error.
+"""
+
+
+def clear_topic_create_retry(chat_id: int, _thread_id: int = 0) -> None:
+    """Compat shim — clear the legacy backoff entry for this chat.
+
+    Auto-create is retired; the dict is always empty, so this is a no-op.
+    Retained to avoid import errors in callers that still reference it.
+    """
+    _topic_create_retry_until.pop(chat_id, None)

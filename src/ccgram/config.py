@@ -167,6 +167,11 @@ class Config:
 
         self._init_messaging()
 
+        # Operator alert thread for unbound-window notifications.
+        # Defaults to 529 (james-claude-hub topic). Set to 0 to fall back to
+        # the group's General thread (topic_id=0).
+        self.alert_thread_id: int = _parse_int_env("CCGRAM_ALERT_THREAD_ID", 529)
+
         # Auto-close stale topics (minutes; 0 = disabled)
         self.autoclose_done_minutes = int(os.getenv("AUTOCLOSE_DONE_MINUTES", "30"))
         self.autoclose_dead_minutes = int(os.getenv("AUTOCLOSE_DEAD_MINUTES", "10"))
