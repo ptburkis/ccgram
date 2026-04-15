@@ -215,20 +215,126 @@ class SessionManager:
         """Check if a key looks like a tmux window ID (e.g. '@0', '@12')."""
         return is_window_id(key)
 
+    def _load_state_from_db(self) -> bool:
+        """Attempt to load session state from the DB.
+
+        Returns True if state was successfully loaded, False if the DB is
+        empty or incomplete (triggers JSON fallback in ``_load_state``).
+
+        Preserves ``user_id`` as the outer key of ``thread_bindings`` by
+        recovering it from ``user_prefs`` rows with scope ``"group_chat"``,
+        where each row's key is ``"{user_id}:{topic_id}"`` and its value is
+        the ``group_id`` (chat_id).  This matches the semantics expected by
+        ``thread_router.py``, ``window_resolver.py``, and ``status_cmd.py``.
+        """
+        import sqlite3
+
+        from . import store
+
+        try:
+            with store.connect() as conn:
+                sessions = store.list_sessions(conn)
+                bindings = store.list_topic_bindings(conn)
+                gchat_rows = store.list_prefs(conn, "group_chat")
+                window_rows = store.list_prefs(conn, "window")
+        except (sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError):
+            return False
+
+        if not sessions and not bindings:
+            return False
+
+        # Build (group_id, topic_id) → user_id reverse lookup from group_chat prefs.
+        # Each row: (scope_id="", key="{user_id}:{topic_id}", value=chat_id/group_id)
+        gid_tid_to_uid: dict[tuple[int, int], int] = {}
+        group_chat_ids: dict[str, int] = {}
+        for _scope_id, key, value in gchat_rows:
+            try:
+                user_id_str, topic_id_str = key.split(":", 1)
+                gid_tid_to_uid[(int(value), int(topic_id_str))] = int(user_id_str)
+                group_chat_ids[key] = int(value)
+            except (ValueError, TypeError):
+                continue
+
+        if bindings and not gid_tid_to_uid:
+            logger.warning(
+                "DB has topic_bindings but no group_chat prefs — "
+                "cannot recover user_id outer key; falling back to state.json"
+            )
+            return False
+
+        # Build window_id → session_id lookup from sessions table.
+        sid_to_wid: dict[str, str] = {}
+        window_states_dict: dict[str, Any] = {}
+        for s in sessions:
+            if s.window_id:
+                sid_to_wid[s.session_id] = s.window_id
+                window_states_dict[s.window_id] = {
+                    "session_id": s.session_id,
+                    "cwd": s.cwd,
+                    "window_name": "",
+                    "transcript_path": "",
+                    "notification_mode": "summary",
+                    "provider_name": "",
+                    "approval_mode": DEFAULT_APPROVAL_MODE,
+                    "batch_mode": DEFAULT_BATCH_MODE,
+                    "external": False,
+                }
+
+        # Build thread_bindings keyed by user_id (int) — the outer key the
+        # rest of the codebase depends on.
+        tb: dict[int, dict[int, str]] = {}
+        for b in bindings:
+            user_id = gid_tid_to_uid.get((b.group_id, b.topic_id))
+            wid = sid_to_wid.get(b.session_id)
+            if user_id is None or wid is None:
+                continue
+            tb.setdefault(user_id, {})[b.topic_id] = wid
+
+        # Recover window display names from "window" scope prefs.
+        # Each row: (scope_id=window_id, key="display_name", value=name)
+        window_display_names: dict[str, str] = {}
+        for wid, key, value in window_rows:
+            if key == "display_name" and isinstance(value, str):
+                window_display_names[wid] = value
+
+        # Populate singletons via their from_dict entrypoints.
+        window_store.from_dict(window_states_dict)
+        user_preferences.from_dict({})
+        thread_router.from_dict(
+            {
+                "thread_bindings": {
+                    str(uid): {str(tid): wid for tid, wid in binds.items()}
+                    for uid, binds in tb.items()
+                },
+                "group_chat_ids": group_chat_ids,
+                "window_display_names": window_display_names,
+            }
+        )
+
+        logger.info(
+            "Loaded state from DB: %d sessions, %d bindings, %d users",
+            len(sessions),
+            len(bindings),
+            len(tb),
+        )
+        return True
+
     def _load_state(self) -> None:
         """Load state during initialization.
 
+        Tries the DB first (DB-first since Phase 4 state-unification).
+        Falls back to legacy state.json if the DB is empty or incomplete.
+        The JSON path is retained for rollback safety until write-retirement
+        (docs/plans/state-unification-runbook.md).
+
         Detects old-format state (window_name keys without '@' prefix) and
         marks for migration on next startup re-resolution.
-
-        # TODO: still legacy — see Phase 4 follow-up.
-        # The DB (store.list_sessions + store.list_topic_bindings) is now the
-        # authoritative source for session/binding identity. Shadow writes to
-        # state.json remain for rollback safety until the retirement timeline
-        # in docs/plans/state-unification-runbook.md completes. When they go,
-        # this loader should prefer the DB and fall back to JSON only with a
-        # WARNING log on first boot.
         """
+        if self._load_state_from_db():
+            return
+
+        logger.warning("falling back to legacy state.json — DB empty or incomplete")
+
         state = self._persistence.load()
         if not state:
             return
