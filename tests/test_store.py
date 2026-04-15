@@ -475,3 +475,154 @@ class TestMigration:
             crons = store.list_crons(c)
         assert sessions == []
         assert crons == []
+
+
+# ---- TestSchemaV2Migration ---------------------------------------------------
+
+
+class TestSchemaV2Migration:
+    """Verify that a v1 database gets migrated to v2 on init_db()."""
+
+    def test_v1_db_gets_new_columns(self, tmp_path):
+        db = tmp_path / "v1.db"
+        conn = sqlite3.connect(str(db))
+        conn.executescript("""
+            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE sessions (session_id TEXT PRIMARY KEY, cwd TEXT NOT NULL,
+                agent TEXT NOT NULL, mode TEXT, status TEXT NOT NULL, window_id TEXT,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+            CREATE TABLE topic_bindings (group_id INTEGER NOT NULL,
+                topic_id INTEGER NOT NULL, session_id TEXT NOT NULL UNIQUE,
+                topic_title TEXT NOT NULL, bound_at INTEGER NOT NULL,
+                PRIMARY KEY (group_id, topic_id));
+            CREATE TABLE orphaned_topics (group_id INTEGER NOT NULL,
+                topic_id INTEGER NOT NULL, topic_title TEXT NOT NULL,
+                first_seen INTEGER NOT NULL, PRIMARY KEY (group_id, topic_id));
+            CREATE TABLE heartbeats (component TEXT PRIMARY KEY,
+                last_beat INTEGER NOT NULL, details TEXT);
+            CREATE TABLE crons (id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                schedule TEXT NOT NULL, target_window TEXT NOT NULL,
+                message TEXT NOT NULL, enabled INTEGER NOT NULL,
+                last_run INTEGER, last_result TEXT, created_at INTEGER NOT NULL);
+            CREATE TABLE user_prefs (scope TEXT NOT NULL,
+                scope_id TEXT NOT NULL DEFAULT '', key TEXT NOT NULL,
+                value TEXT NOT NULL, updated_at INTEGER NOT NULL,
+                PRIMARY KEY (scope, scope_id, key));
+            INSERT INTO schema_meta VALUES ('schema_version', '1');
+        """)
+        conn.close()
+
+        store.init_db(db)
+
+        with store.connect(db) as c:
+            cols = {r[1] for r in c.execute("PRAGMA table_info(crons)").fetchall()}
+            assert "target_session_id" in cols
+            assert "target_topic_id" in cols
+            assert "target_group_id" in cols
+            version = c.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()
+            assert version[0] == "2"
+
+    def test_migration_is_idempotent(self, tmp_path):
+        db = tmp_path / "v2.db"
+        store.init_db(db)
+        store.init_db(db)
+        with store.connect(db) as c:
+            version = c.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()
+            assert version[0] == "2"
+
+
+# ---- TestCronV2Fields --------------------------------------------------------
+
+
+class TestCronV2Fields:
+    def test_upsert_and_retrieve_new_fields(self, conn):
+        store.upsert_cron(
+            conn, id=99, name="Test", schedule="0 * * * *",
+            target_window="old-window", message="msg", enabled=True,
+            created_at=0,
+            target_session_id="sess-abc",
+            target_topic_id=42,
+            target_group_id=-1001234,
+        )
+        c = store.get_cron(conn, 99)
+        assert c is not None
+        assert c.target_session_id == "sess-abc"
+        assert c.target_topic_id == 42
+        assert c.target_group_id == -1001234
+
+    def test_new_fields_default_to_none(self, conn):
+        store.upsert_cron(
+            conn, id=100, name="Legacy", schedule="0 * * * *",
+            target_window="win", message="msg", enabled=True, created_at=0,
+        )
+        c = store.get_cron(conn, 100)
+        assert c is not None
+        assert c.target_session_id is None
+        assert c.target_topic_id is None
+        assert c.target_group_id is None
+
+
+# ---- TestResolveCronTarget ---------------------------------------------------
+
+
+class TestResolveCronTarget:
+    def _session(self, conn, sid, window_id):
+        store.upsert_session(conn, session_id=sid, cwd="/c", agent="claude",
+                             status="active", window_id=window_id, created_at=0)
+
+    def _binding(self, conn, sid, group_id, topic_id):
+        store.upsert_topic_binding(conn, group_id=group_id, topic_id=topic_id,
+                                   session_id=sid, topic_title="T", bound_at=0)
+
+    def _cron(self, **kwargs) -> store.Cron:
+        defaults = dict(
+            id=1, name="t", schedule="*", target_window="", message="m",
+            enabled=True, last_run=None, last_result=None, created_at=0,
+            target_session_id=None, target_topic_id=None, target_group_id=None,
+        )
+        defaults.update(kwargs)
+        return store.Cron(**defaults)
+
+    def test_resolves_via_session_id(self, conn):
+        self._session(conn, "s1", "@1")
+        cron = self._cron(target_session_id="s1")
+        result = store.resolve_cron_target(cron, conn)
+        assert result is not None
+        assert result["source"] == "session_id"
+        assert result["window_id"] == "@1"
+        assert result["session_id"] == "s1"
+
+    def test_resolves_via_topic_id(self, conn):
+        self._session(conn, "s2", "@2")
+        self._binding(conn, "s2", 9, 55)
+        cron = self._cron(target_group_id=9, target_topic_id=55)
+        result = store.resolve_cron_target(cron, conn)
+        assert result is not None
+        assert result["source"] == "topic_id"
+        assert result["window_id"] == "@2"
+        assert result["topic_id"] == 55
+
+    def test_session_id_wins_over_topic_id(self, conn):
+        self._session(conn, "s1", "@1")
+        self._session(conn, "s2", "@2")
+        self._binding(conn, "s2", 9, 55)
+        cron = self._cron(target_session_id="s1", target_group_id=9, target_topic_id=55)
+        result = store.resolve_cron_target(cron, conn)
+        assert result["source"] == "session_id"
+        assert result["window_id"] == "@1"
+
+    def test_resolves_via_legacy_window(self, conn):
+        cron = self._cron(target_window="my-win")
+        result = store.resolve_cron_target(cron, conn)
+        assert result is not None
+        assert result["source"] == "legacy_window"
+        assert result["window_id"] == "my-win"
+
+    def test_returns_none_when_nothing_resolves(self, conn):
+        cron = self._cron(target_window="")
+        result = store.resolve_cron_target(cron, conn)
+        assert result is None

@@ -212,12 +212,24 @@ def _parse_effort(pane_text: str) -> str | None:
     return _EFFORT_CHAR_MAP.get(char)
 
 
+_RE_EFFORT_SUFFIX = _re.compile(
+    r"(?:\s+(?:\[H\]|\[M\]|\[L\]|\u26a1|\U0001f41a))+$"
+)
+
+
 def _strip_effort_suffix(name: str) -> str:
-    """Remove any [H], [M], or [L] effort suffix from the end of a topic name."""
-    result = name.rstrip()
-    for suffix in ("[H]", "[M]", "[L]"):
-        result = result.removesuffix(suffix).rstrip()
-    return result
+    """Remove trailing effort/status suffixes from a topic name.
+
+    Strips any combination of trailing: [H], [M], [L], ⚡, 🐚 — in any order.
+    Returns the cleaned base, with trailing whitespace also removed.
+
+    Examples:
+        "james-2 [M]"       → "james-2"
+        "James [L]"         → "James"
+        "proj 🐚 ⚡ [H]"  → "proj"
+        "clean"             → "clean"
+    """
+    return _RE_EFFORT_SUFFIX.sub("", name).rstrip()
 
 
 def _strip_bg_suffix(name: str) -> str:
@@ -317,6 +329,27 @@ async def _check_background_work(
         pass  # non-critical, silently degrade
 
 
+async def _fetch_live_topic_title(chat_id: int, thread_id: int) -> str | None:
+    """Fetch the current live topic title from Telegram via MTProto.
+
+    Returns the title string, or None when MTProto is unavailable (missing
+    credentials, session file, network error). Never raises.
+    """
+    try:
+        from ..mtproto_client import MTProtoClient  # lazy import — avoids hard dep
+        client = MTProtoClient()
+        async with client:
+            topics = await client.get_forum_topics_by_id(chat_id, [thread_id])
+        return topics[0].title if topics else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "effort_suffix.mtproto_unavailable",
+            thread_id=thread_id,
+            error=str(exc),
+        )
+        return None
+
+
 async def _apply_effort_suffix(
     bot: Bot,
     window_id: str,
@@ -325,31 +358,42 @@ async def _apply_effort_suffix(
 ) -> None:
     """Apply (or remove) an effort suffix on a Telegram topic.
 
-    Resolves the chat_id, strips any existing effort suffix, appends the new
-    one (if level is not None), calls edit_forum_topic, and updates local state.
-    Called by _check_effort_suffix (poll-detected) and the /effort command.
+    Preserves user-chosen titles: fetches the live Telegram topic title via
+    MTProto, strips known suffixes to get the base, and compares it to the
+    window name (case-insensitive). If they differ, the user renamed the topic —
+    keep their base and only update the suffix. Falls back to window-name
+    behaviour when MTProto is unavailable. Never blocks the poll loop.
     """
-    chat_id = thread_router.resolve_chat_id(
-        next(
-            (
-                uid
-                for uid, tid, wid in thread_router.iter_thread_bindings()
-                if wid == window_id
-            ),
-            0,
-        ),
-        thread_id,
+    user_id = next(
+        (uid for uid, tid, wid in thread_router.iter_thread_bindings() if wid == window_id),
+        0,
     )
+    chat_id = thread_router.resolve_chat_id(user_id, thread_id)
     if not chat_id:
         return
 
-    display = thread_router.get_display_name(window_id) or ""
-    clean_name = _strip_effort_suffix(display)
+    # Prefer authoritative live title; fall back to locally-stored display name.
+    live_title = await _fetch_live_topic_title(chat_id, thread_id)
+    display = live_title if live_title is not None else (thread_router.get_display_name(window_id) or "")
 
-    if level:
-        new_name = f"{clean_name}{_EFFORT_SUFFIX_MAP[level]}"
+    live_base = _strip_effort_suffix(display)
+    window_name = thread_router.get_display_name(window_id) or window_id
+    window_base = _strip_effort_suffix(window_name)
+
+    if live_base and live_base.lower() != window_base.lower():
+        # User renamed the topic — preserve their chosen base, update suffix only.
+        clean_name = live_base
+        logger.debug(
+            "effort_suffix.user_title_preserved",
+            window_id=window_id,
+            user_base=live_base,
+            window_base=window_base,
+        )
     else:
-        new_name = clean_name
+        # Auto-managed title — use window base (or live_base as last resort).
+        clean_name = window_base if window_base else live_base
+
+    new_name = f"{clean_name}{_EFFORT_SUFFIX_MAP[level]}" if level else clean_name
 
     if new_name == display:
         _effort_shown[window_id] = level
@@ -364,11 +408,7 @@ async def _apply_effort_suffix(
         _effort_shown[window_id] = level
         _save_effort_state()
         session_manager.set_display_name(window_id, new_name)
-        logger.debug(
-            "Effort indicator: %s -> %r",
-            window_id,
-            new_name,
-        )
+        logger.debug("Effort indicator: %s -> %r", window_id, new_name)
     except TelegramError:
         pass  # non-critical, silently degrade
 

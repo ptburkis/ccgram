@@ -218,11 +218,60 @@ def _migrate_topic_bindings(  # noqa: C901
     return counts
 
 
-def _migrate_crons(conn, crons_data: list | None, verbose: bool) -> dict[str, int]:
-    """Populate ``crons`` from crons.json."""
+def _resolve_cron_session(
+    conn,
+    window_name: str,
+    name_to_wid: dict[str, str],
+    cron_name: str,
+) -> tuple[str | None, int | None, int | None]:
+    """Return (target_session_id, target_topic_id, target_group_id) for a cron.
+
+    Best-effort: looks up the session matching ``window_name`` via the display
+    names map.  Logs a WARNING and returns all-None if no match.
+    """
+    if not window_name:
+        return None, None, None
+    wid = name_to_wid.get(window_name)
+    if wid:
+        session = store.get_session_by_window(conn, wid)
+        if session:
+            binding = store.get_binding_for_session(conn, session.session_id)
+            t_id = binding.topic_id if binding else None
+            g_id = binding.group_id if binding else None
+            return session.session_id, t_id, g_id
+    logger.warning(
+        "cron %r: no session found for target_window=%r "
+        "-- cron will use legacy window targeting",
+        cron_name,
+        window_name,
+    )
+    return None, None, None
+
+
+def _migrate_crons(
+    conn,
+    crons_data: list | None,
+    window_display_names: dict | None,
+    verbose: bool,
+) -> dict[str, int]:
+    """Populate ``crons`` from crons.json.
+
+    Best-effort: populates ``target_session_id``/``target_topic_id``/
+    ``target_group_id`` by matching ``window_name`` against the display-names
+    map + sessions table.  Logs a WARNING for any cron that cannot be resolved
+    to a session (it will fall back to legacy window targeting at fire time).
+    """
     counts = {"inserted": 0}
     if not crons_data:
         return counts
+
+    # Build reverse map: display_name -> window_id (e.g. "@3")
+    name_to_wid: dict[str, str] = {}
+    if window_display_names:
+        for wid, name in window_display_names.items():
+            if isinstance(name, str):
+                name_to_wid[name] = wid
+
     for entry in crons_data:
         if not isinstance(entry, dict):
             continue
@@ -231,16 +280,24 @@ def _migrate_crons(conn, crons_data: list | None, verbose: bool) -> dict[str, in
             continue
         created_at = _iso_to_epoch(entry.get("created")) or 0
         last_run = _iso_to_epoch(entry.get("last_run"))
+        tw = entry.get("window_name", "")
+        target_session_id, target_topic_id, target_group_id = _resolve_cron_session(
+            conn, tw, name_to_wid, entry.get("name", "?")
+        )
+
         store.upsert_cron(
             conn,
             id=int(cron_id),
             name=entry.get("name", ""),
             schedule=entry.get("schedule", ""),
-            target_window=entry.get("window_name", ""),
+            target_window=tw,
             message=entry.get("message", ""),
             enabled=bool(entry.get("enabled", False)),
             created_at=created_at,
             last_run=last_run,
+            target_session_id=target_session_id,
+            target_topic_id=target_topic_id,
+            target_group_id=target_group_id,
         )
         counts["inserted"] += 1
         if verbose:
@@ -388,7 +445,7 @@ def migrate(source: Path, db: Path, dry_run: bool, verbose: bool) -> None:
             state_data.get("group_chat_ids") if state_data else None,
             verbose,
         )
-        c_counts = _migrate_crons(raw_conn, crons_data, verbose)
+        c_counts = _migrate_crons(raw_conn, crons_data, window_display_names, verbose)
         h_counts = _migrate_heartbeats(raw_conn, health_state, verbose)
         p_counts = _migrate_user_prefs(
             raw_conn,

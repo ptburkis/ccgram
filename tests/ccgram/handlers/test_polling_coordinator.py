@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from telegram import Bot
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 
 from ccgram.handlers.topic_lifecycle import (
     check_autoclose_timers,
@@ -16,7 +16,10 @@ from ccgram.handlers.topic_lifecycle import (
 from ccgram.handlers.polling_coordinator import (
     _BACKOFF_MAX,
     _BACKOFF_MIN,
+    _apply_effort_suffix,
+    _fetch_live_topic_title,
     _handle_dead_window_notification,
+    _strip_effort_suffix,
 )
 from ccgram.handlers.polling_strategies import (
     lifecycle_strategy,
@@ -34,6 +37,275 @@ def _clean_strategy_state():
     terminal_strategy._states.clear()
     lifecycle_strategy._states.clear()
     lifecycle_strategy._dead_notified.clear()
+
+
+# ── _strip_effort_suffix ────────────────────────────────────────────────
+
+
+class TestStripEffortSuffix:
+    def test_strips_medium(self):
+        assert _strip_effort_suffix("james-2 [M]") == "james-2"
+
+    def test_strips_low(self):
+        assert _strip_effort_suffix("my-project [L]") == "my-project"
+
+    def test_strips_high(self):
+        assert _strip_effort_suffix("bulugo-dev [H]") == "bulugo-dev"
+
+    def test_strips_lightning(self):
+        assert _strip_effort_suffix("james ⚡") == "james"
+
+    def test_strips_snail(self):
+        assert _strip_effort_suffix("james 🐚") == "james"
+
+    def test_strips_multiple_suffixes(self):
+        assert _strip_effort_suffix("proj 🐚 ⚡ [H]") == "proj"
+
+    def test_no_suffix_unchanged(self):
+        assert _strip_effort_suffix("clean") == "clean"
+
+    def test_empty_string(self):
+        assert _strip_effort_suffix("") == ""
+
+    def test_strips_trailing_whitespace(self):
+        assert _strip_effort_suffix("name   ") == "name"
+
+    def test_user_title_with_spaces_preserved(self):
+        # A title like "James Dev" should not lose internal spaces
+        assert _strip_effort_suffix("James Dev [M]") == "James Dev"
+
+
+# ── _fetch_live_topic_title ─────────────────────────────────────────────
+
+
+class TestFetchLiveTopicTitle:
+    # MTProtoClient is lazily imported inside _fetch_live_topic_title, so we
+    # patch it at its source module rather than at the caller's namespace.
+    _PATCH_TARGET = "ccgram.mtproto_client.MTProtoClient"
+
+    @pytest.mark.asyncio
+    async def test_returns_title_on_success(self):
+        mock_topic = MagicMock()
+        mock_topic.title = "James"
+        mock_client = AsyncMock()
+        mock_client.get_forum_topics_by_id = AsyncMock(return_value=[mock_topic])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(self._PATCH_TARGET, return_value=mock_client):
+            result = await _fetch_live_topic_title(-100123, 69)
+        assert result == "James"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_credentials_error(self):
+        from ccgram.mtproto_client import MTProtoCredentialsError
+
+        with patch(self._PATCH_TARGET, side_effect=MTProtoCredentialsError("no creds")):
+            result = await _fetch_live_topic_title(-100123, 69)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_empty_response(self):
+        mock_client = AsyncMock()
+        mock_client.get_forum_topics_by_id = AsyncMock(return_value=[])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(self._PATCH_TARGET, return_value=mock_client):
+            result = await _fetch_live_topic_title(-100123, 69)
+        assert result is None
+
+
+# ── _apply_effort_suffix ────────────────────────────────────────────────
+
+
+def _make_bot() -> AsyncMock:
+    bot = AsyncMock(spec=Bot)
+    bot.edit_forum_topic = AsyncMock()
+    return bot
+
+
+class TestApplyEffortSuffixAutoManaged:
+    """When live base == window name → standard behaviour, no user-title logic."""
+
+    @pytest.mark.asyncio
+    async def test_applies_suffix_when_base_matches_window(self):
+        bot = _make_bot()
+        with (
+            patch("ccgram.handlers.polling_coordinator.thread_router") as mock_router,
+            patch("ccgram.handlers.polling_coordinator.session_manager"),
+            patch(
+                "ccgram.handlers.polling_coordinator._fetch_live_topic_title",
+                new=AsyncMock(return_value="james-2"),  # base == window_name
+            ),
+        ):
+            mock_router.iter_thread_bindings.return_value = [(1, 69, "james-2")]
+            mock_router.resolve_chat_id.return_value = -100123
+            mock_router.get_display_name.return_value = "james-2"
+
+            await _apply_effort_suffix(bot, "james-2", 69, "M")
+
+        bot.edit_forum_topic.assert_awaited_once()
+        _, kwargs = bot.edit_forum_topic.call_args
+        assert kwargs["name"] == "james-2 [M]"
+
+    @pytest.mark.asyncio
+    async def test_removes_suffix_on_none_level(self):
+        bot = _make_bot()
+        with (
+            patch("ccgram.handlers.polling_coordinator.thread_router") as mock_router,
+            patch("ccgram.handlers.polling_coordinator.session_manager"),
+            patch(
+                "ccgram.handlers.polling_coordinator._fetch_live_topic_title",
+                new=AsyncMock(return_value="james-2 [M]"),
+            ),
+        ):
+            mock_router.iter_thread_bindings.return_value = [(1, 69, "james-2")]
+            mock_router.resolve_chat_id.return_value = -100123
+            mock_router.get_display_name.return_value = "james-2"
+
+            await _apply_effort_suffix(bot, "james-2", 69, None)
+
+        bot.edit_forum_topic.assert_awaited_once()
+        _, kwargs = bot.edit_forum_topic.call_args
+        assert kwargs["name"] == "james-2"
+
+
+class TestApplyEffortSuffixUserTitle:
+    """When live base != window name → preserve user's custom title base."""
+
+    @pytest.mark.asyncio
+    async def test_preserves_user_custom_base(self):
+        """'James [L]' + window 'james-2' + effort M → 'James [M]'."""
+        bot = _make_bot()
+        with (
+            patch("ccgram.handlers.polling_coordinator.thread_router") as mock_router,
+            patch("ccgram.handlers.polling_coordinator.session_manager"),
+            patch(
+                "ccgram.handlers.polling_coordinator._fetch_live_topic_title",
+                new=AsyncMock(return_value="James [L]"),
+            ),
+        ):
+            mock_router.iter_thread_bindings.return_value = [(1, 69, "james-2")]
+            mock_router.resolve_chat_id.return_value = -100123
+            mock_router.get_display_name.return_value = "james-2"
+
+            await _apply_effort_suffix(bot, "james-2", 69, "M")
+
+        bot.edit_forum_topic.assert_awaited_once()
+        _, kwargs = bot.edit_forum_topic.call_args
+        assert kwargs["name"] == "James [M]"
+
+    @pytest.mark.asyncio
+    async def test_preserves_user_title_removes_suffix(self):
+        """'James [M]' + window 'james-2' + effort None → 'James'."""
+        bot = _make_bot()
+        with (
+            patch("ccgram.handlers.polling_coordinator.thread_router") as mock_router,
+            patch("ccgram.handlers.polling_coordinator.session_manager"),
+            patch(
+                "ccgram.handlers.polling_coordinator._fetch_live_topic_title",
+                new=AsyncMock(return_value="James [M]"),
+            ),
+        ):
+            mock_router.iter_thread_bindings.return_value = [(1, 69, "james-2")]
+            mock_router.resolve_chat_id.return_value = -100123
+            mock_router.get_display_name.return_value = "james-2"
+
+            await _apply_effort_suffix(bot, "james-2", 69, None)
+
+        bot.edit_forum_topic.assert_awaited_once()
+        _, kwargs = bot.edit_forum_topic.call_args
+        assert kwargs["name"] == "James"
+
+    @pytest.mark.asyncio
+    async def test_case_insensitive_comparison(self):
+        """'JAMES' (same base as 'james-2' after strip? — no, it's different)
+        → preserves 'JAMES' because JAMES != james-2."""
+        bot = _make_bot()
+        with (
+            patch("ccgram.handlers.polling_coordinator.thread_router") as mock_router,
+            patch("ccgram.handlers.polling_coordinator.session_manager"),
+            patch(
+                "ccgram.handlers.polling_coordinator._fetch_live_topic_title",
+                new=AsyncMock(return_value="JAMES"),
+            ),
+        ):
+            mock_router.iter_thread_bindings.return_value = [(1, 69, "james-2")]
+            mock_router.resolve_chat_id.return_value = -100123
+            mock_router.get_display_name.return_value = "james-2"
+
+            await _apply_effort_suffix(bot, "james-2", 69, "H")
+
+        bot.edit_forum_topic.assert_awaited_once()
+        _, kwargs = bot.edit_forum_topic.call_args
+        assert kwargs["name"] == "JAMES [H]"
+
+
+class TestApplyEffortSuffixMTProtoFallback:
+    """MTProto failure → fall back to locally-stored display name."""
+
+    @pytest.mark.asyncio
+    async def test_fallback_on_mtproto_failure(self):
+        """When MTProto returns None, use locally-stored display name."""
+        bot = _make_bot()
+        with (
+            patch("ccgram.handlers.polling_coordinator.thread_router") as mock_router,
+            patch("ccgram.handlers.polling_coordinator.session_manager"),
+            patch(
+                "ccgram.handlers.polling_coordinator._fetch_live_topic_title",
+                new=AsyncMock(return_value=None),  # MTProto unavailable
+            ),
+        ):
+            mock_router.iter_thread_bindings.return_value = [(1, 69, "james-2")]
+            mock_router.resolve_chat_id.return_value = -100123
+            mock_router.get_display_name.return_value = "james-2"
+
+            await _apply_effort_suffix(bot, "james-2", 69, "M")
+
+        # Falls back to window name behaviour
+        bot.edit_forum_topic.assert_awaited_once()
+        _, kwargs = bot.edit_forum_topic.call_args
+        assert kwargs["name"] == "james-2 [M]"
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_chat_id(self):
+        bot = _make_bot()
+        with (
+            patch("ccgram.handlers.polling_coordinator.thread_router") as mock_router,
+            patch(
+                "ccgram.handlers.polling_coordinator._fetch_live_topic_title",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            mock_router.iter_thread_bindings.return_value = []
+            mock_router.resolve_chat_id.return_value = None
+
+            await _apply_effort_suffix(bot, "ghost", 99, "L")
+
+        bot.edit_forum_topic.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_telegram_error_silently_ignored(self):
+        bot = _make_bot()
+        bot.edit_forum_topic = AsyncMock(side_effect=TelegramError("oops"))
+        with (
+            patch("ccgram.handlers.polling_coordinator.thread_router") as mock_router,
+            patch("ccgram.handlers.polling_coordinator.session_manager"),
+            patch(
+                "ccgram.handlers.polling_coordinator._fetch_live_topic_title",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            mock_router.iter_thread_bindings.return_value = [(1, 69, "w")]
+            mock_router.resolve_chat_id.return_value = -100123
+            mock_router.get_display_name.return_value = "w"
+
+            # Must not raise
+            await _apply_effort_suffix(bot, "w", 69, "L")
+
+
+# ── Original tests kept intact ──────────────────────────────────────────
 
 
 class TestCheckAutocloseTimers:

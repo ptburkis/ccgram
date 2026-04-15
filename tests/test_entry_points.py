@@ -252,23 +252,31 @@ async def test_topic_orchestration_create_topic_in_chat_shadow_write(ccgram_test
     mock_bot = MagicMock()
     mock_bot.create_forum_topic = AsyncMock(return_value=mock_topic)
 
-    with (
-        patch.object(topic_orchestration, "_bind_topic_to_user"),
-        patch("ccgram.session_lifecycle.create_session", create_session_mock),
-        patch("ccgram.handlers.topic_orchestration.session_manager") as mock_sm,
-    ):
-        mock_ws = MagicMock()
-        mock_ws.cwd = "/home/peter/myproject"
-        mock_ws.provider_name = "claude"
-        mock_ws.approval_mode = "normal"
-        mock_sm.get_window_state.return_value = mock_ws
+    # Auto-create is gated behind CCGRAM_ALLOW_AUTO_TOPIC during the state-
+    # unification live migration. Set the env var for this test so the shadow-
+    # write path is reachable.
+    import os as _os
+    _os.environ["CCGRAM_ALLOW_AUTO_TOPIC"] = "1"
+    try:
+        with (
+            patch.object(topic_orchestration, "_bind_topic_to_user"),
+            patch("ccgram.session_lifecycle.create_session", create_session_mock),
+            patch("ccgram.handlers.topic_orchestration.session_manager") as mock_sm,
+        ):
+            mock_ws = MagicMock()
+            mock_ws.cwd = "/home/peter/myproject"
+            mock_ws.provider_name = "claude"
+            mock_ws.approval_mode = "normal"
+            mock_sm.get_window_state.return_value = mock_ws
 
-        await topic_orchestration.create_topic_in_chat(
-            bot=mock_bot,
-            chat_id=-1001234567890,
-            window_id="@42",
-            topic_name="my-topic",
-        )
+            await topic_orchestration.create_topic_in_chat(
+                bot=mock_bot,
+                chat_id=-1001234567890,
+                window_id="@42",
+                topic_name="my-topic",
+            )
+    finally:
+        _os.environ.pop("CCGRAM_ALLOW_AUTO_TOPIC", None)
 
     create_session_mock.assert_awaited_once()
     call_kwargs = create_session_mock.call_args.kwargs

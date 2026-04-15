@@ -16,9 +16,14 @@ queried relationally, and grows organically as new per-window/per-group features
 added. A single ``user_prefs(scope, scope_id, key, value)`` table covers all of these
 without premature schema commits. If query patterns later demand relational access,
 individual fields can be promoted to structured tables in a follow-up migration.
+
+Schema versions:
+  1 — initial schema (sessions, topic_bindings, orphaned_topics, heartbeats, crons, user_prefs)
+  2 — crons: added target_session_id, target_topic_id, target_group_id columns
 """
 
 import json
+import logging
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -28,9 +33,11 @@ from typing import Any
 
 from ccgram.utils import ccgram_dir
 
+logger = logging.getLogger(__name__)
+
 # ---- Schema ------------------------------------------------------------------
 
-_SCHEMA_VERSION = "1"
+_SCHEMA_VERSION = "2"
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -77,15 +84,19 @@ CREATE TABLE IF NOT EXISTS heartbeats (
 );
 
 CREATE TABLE IF NOT EXISTS crons (
-    id            INTEGER PRIMARY KEY,
-    name          TEXT NOT NULL,
-    schedule      TEXT NOT NULL,
-    target_window TEXT NOT NULL,
-    message       TEXT NOT NULL,
-    enabled       INTEGER NOT NULL CHECK (enabled IN (0,1)),
-    last_run      INTEGER,
-    last_result   TEXT,
-    created_at    INTEGER NOT NULL
+    id                INTEGER PRIMARY KEY,
+    name              TEXT NOT NULL,
+    schedule          TEXT NOT NULL,
+    target_window     TEXT NOT NULL,  -- DEPRECATED: use target_session_id or target_topic_id
+    message           TEXT NOT NULL,
+    enabled           INTEGER NOT NULL CHECK (enabled IN (0,1)),
+    last_run          INTEGER,
+    last_result       TEXT,
+    created_at        INTEGER NOT NULL,
+    -- v2: canonical targeting columns (prefer over target_window)
+    target_session_id TEXT,           -- canonical: session UUID from sessions table
+    target_topic_id   INTEGER,        -- canonical: Telegram topic_id (pair with target_group_id)
+    target_group_id   INTEGER         -- canonical: Telegram group_id (pair with target_topic_id)
 );
 CREATE INDEX IF NOT EXISTS idx_crons_enabled ON crons(enabled);
 
@@ -154,12 +165,16 @@ class Cron:
     id: int
     name: str
     schedule: str
-    target_window: str
+    target_window: str  # DEPRECATED — use target_session_id or (target_group_id, target_topic_id)
     message: str
     enabled: bool
     last_run: int | None
     last_result: str | None
     created_at: int
+    # v2: canonical targeting (prefer over target_window)
+    target_session_id: str | None = None
+    target_topic_id: int | None = None
+    target_group_id: int | None = None
 
 
 # ---- DB path + init ----------------------------------------------------------
@@ -170,11 +185,37 @@ def db_path() -> Path:
     return ccgram_dir() / "state.db"
 
 
+_V2_ALTERS = [
+    ("target_session_id", "ALTER TABLE crons ADD COLUMN target_session_id TEXT"),
+    ("target_topic_id", "ALTER TABLE crons ADD COLUMN target_topic_id INTEGER"),
+    ("target_group_id", "ALTER TABLE crons ADD COLUMN target_group_id INTEGER"),
+]
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Apply schema migrations not yet present.  Idempotent."""
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key='schema_version'"
+    ).fetchone()
+    current = int(row[0]) if row else 1
+    if current >= 2:  # noqa: PLR2004
+        return
+    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(crons)").fetchall()}
+    for col, stmt in _V2_ALTERS:
+        if col not in existing_cols:
+            conn.execute(stmt)
+            logger.info("schema migration v2: added crons.%s", col)
+    conn.execute("UPDATE schema_meta SET value='2' WHERE key='schema_version'")
+    conn.commit()
+
+
 def init_db(path: Path | None = None) -> Path:
     """Create the database file and schema idempotently.
 
-    Safe to call multiple times — all DDL uses ``IF NOT EXISTS``.  Returns the
-    resolved path so callers can chain: ``conn = sqlite3.connect(init_db())``.
+    Safe to call multiple times — all DDL uses ``IF NOT EXISTS``.  Applies
+    incremental migrations when an existing database is at a lower schema
+    version.  Returns the resolved path so callers can chain:
+    ``conn = sqlite3.connect(init_db())``.
     """
     resolved = path or db_path()
     resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -186,6 +227,7 @@ def init_db(path: Path | None = None) -> Path:
             ("schema_version", _SCHEMA_VERSION),
         )
         conn.commit()
+        _apply_migrations(conn)
     finally:
         conn.close()
     return resolved
@@ -521,6 +563,9 @@ def upsert_cron(
     created_at: int | None = None,
     last_run: int | None = None,
     last_result: str | None = None,
+    target_session_id: str | None = None,
+    target_topic_id: int | None = None,
+    target_group_id: int | None = None,
 ) -> None:
     """Insert or update a cron definition."""
     c_at = created_at if created_at is not None else int(time.time())
@@ -528,19 +573,24 @@ def upsert_cron(
         """
         INSERT INTO crons
             (id, name, schedule, target_window, message, enabled,
-             last_run, last_result, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             last_run, last_result, created_at,
+             target_session_id, target_topic_id, target_group_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
-            name          = excluded.name,
-            schedule      = excluded.schedule,
-            target_window = excluded.target_window,
-            message       = excluded.message,
-            enabled       = excluded.enabled,
-            last_run      = excluded.last_run,
-            last_result   = excluded.last_result
+            name              = excluded.name,
+            schedule          = excluded.schedule,
+            target_window     = excluded.target_window,
+            message           = excluded.message,
+            enabled           = excluded.enabled,
+            last_run          = excluded.last_run,
+            last_result       = excluded.last_result,
+            target_session_id = excluded.target_session_id,
+            target_topic_id   = excluded.target_topic_id,
+            target_group_id   = excluded.target_group_id
         """,
         (id, name, schedule, target_window, message, int(enabled),
-         last_run, last_result, c_at),
+         last_run, last_result, c_at,
+         target_session_id, target_topic_id, target_group_id),
     )
 
 
@@ -569,7 +619,40 @@ def delete_cron(conn: sqlite3.Connection, id: int) -> int:
     return cur.rowcount
 
 
+def resolve_cron_target(cron: "Cron", conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """Resolve the dispatch target for *cron* using the priority ladder.
+
+    Priority: target_session_id > (target_group_id, target_topic_id) > target_window (legacy).
+    Returns dict with window_id/session_id/topic_id/source, or None.
+    """
+    # 1. Prefer target_session_id
+    if cron.target_session_id:
+        session = get_session(conn, cron.target_session_id)
+        if session is not None:
+            return {"window_id": session.window_id, "session_id": session.session_id,
+                    "topic_id": None, "source": "session_id"}
+    # 2. Fallback to (target_group_id, target_topic_id)
+    if cron.target_group_id is not None and cron.target_topic_id is not None:
+        binding = get_topic_binding(conn, cron.target_group_id, cron.target_topic_id)
+        if binding is not None:
+            session = get_session(conn, binding.session_id)
+            return {"window_id": session.window_id if session else None,
+                    "session_id": binding.session_id, "topic_id": cron.target_topic_id,
+                    "source": "topic_id"}
+    # 3. Legacy target_window
+    if cron.target_window:
+        logger.warning(
+            "cron %d (%r) uses deprecated target_window=%r — migrate to "
+            "target_session_id or target_topic_id",
+            cron.id, cron.name, cron.target_window,
+        )
+        return {"window_id": cron.target_window, "session_id": None,
+                "topic_id": None, "source": "legacy_window"}
+    return None
+
+
 def _row_to_cron(row: sqlite3.Row) -> Cron:
+    keys = row.keys() if hasattr(row, "keys") else []
     return Cron(
         id=row["id"],
         name=row["name"],
@@ -580,6 +663,9 @@ def _row_to_cron(row: sqlite3.Row) -> Cron:
         last_run=row["last_run"],
         last_result=row["last_result"],
         created_at=row["created_at"],
+        target_session_id=row["target_session_id"] if "target_session_id" in keys else None,
+        target_topic_id=row["target_topic_id"] if "target_topic_id" in keys else None,
+        target_group_id=row["target_group_id"] if "target_group_id" in keys else None,
     )
 
 
