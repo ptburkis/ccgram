@@ -95,7 +95,7 @@ max-statements = 60
 # Session manager: complex state migration (resolve_stale_ids) and session map loading
 "src/ccgram/session.py" = ["C901", "PLR0912", "PLR0915"]
 # Session monitor: filesystem scan with many validation branches
-"src/ccgram/session_monitor.py" = ["C901", "PLR0912"]
+"src/ccgram/session_monitor.py" = ["C901", "PLR0912", "PLR0915"]
 # Session watcher: inotify constants use UPPER_CASE (Linux convention), pre-existing
 "src/ccgram/session_watcher.py" = ["N803", "N806", "F401", "PLR2004", "C901", "PLR0912"]
 # Bot: callback dispatch and message routing are inherently branchy

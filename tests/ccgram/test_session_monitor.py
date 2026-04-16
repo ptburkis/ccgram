@@ -864,3 +864,177 @@ def _make_gemini_provider():
     from ccgram.providers.gemini import GeminiProvider
 
     return GeminiProvider()
+
+
+class TestCatchupCap:
+    """Catch-up cap and debounce: non-fresh scans with large batches are trimmed."""
+
+    @staticmethod
+    def _asst_line(i: int) -> str:
+        return (
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"msg '
+            + str(i)
+            + '"}]}}'
+        )
+
+    @staticmethod
+    def _write_lines(path, n: int, append: bool = False) -> None:
+        mode = "a" if append else "w"
+        with open(path, mode) as f:
+            for i in range(n):
+                f.write(TestCatchupCap._asst_line(i) + "\n")
+
+    async def test_fresh_file_no_notice(self, tmp_path, monkeypatch) -> None:
+        """Fresh scan (offset=0): 15 messages → 15 deliveries, no notice."""
+        import ccgram.session_monitor as sm
+
+        monkeypatch.setenv("CCGRAM_CATCHUP_CAP", "10")
+        monkeypatch.setattr(sm, "_CATCHUP_CAP", 10)
+        sm._catchup_notice_last.clear()
+
+        session_file = tmp_path / "transcript.jsonl"
+        self._write_lines(session_file, 15)
+
+        monitor = SessionMonitor(
+            projects_path=tmp_path / "projects",
+            state_file=tmp_path / "ms.json",
+        )
+        # offset=0 → fresh scan
+        tracked = TrackedSession(
+            session_id="fresh-sess", file_path=str(session_file), last_byte_offset=0
+        )
+        monitor.state.update_session(tracked)
+
+        new_messages: list = []
+        with patch("ccgram.session_monitor.get_timeline", return_value=AsyncMock()):
+            await monitor._process_session_file(
+                "fresh-sess", session_file, new_messages
+            )
+
+        assert len(new_messages) == 15
+        assert not any("\U0001f504" in m.text for m in new_messages)
+
+    async def test_nonfresh_over_cap_emits_notice_and_trims(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Non-fresh scan, 15 msgs > cap=10 → 1 notice + 10 deliveries = 11 total."""
+        import ccgram.session_monitor as sm
+
+        monkeypatch.setenv("CCGRAM_CATCHUP_CAP", "10")
+        monkeypatch.setattr(sm, "_CATCHUP_CAP", 10)
+        sm._catchup_notice_last.clear()
+
+        session_file = tmp_path / "transcript.jsonl"
+        # Seed file with 1 line so non_zero_offset > 0
+        self._write_lines(session_file, 1)
+        non_zero_offset = session_file.stat().st_size
+
+        monitor = SessionMonitor(
+            projects_path=tmp_path / "projects",
+            state_file=tmp_path / "ms.json",
+        )
+        tracked = TrackedSession(
+            session_id="nonfresh-over",
+            file_path=str(session_file),
+            last_byte_offset=non_zero_offset,
+        )
+        monitor.state.update_session(tracked)
+        monitor._file_mtimes["nonfresh-over"] = 0.0  # force mtime check to pass
+
+        # Append 15 new assistant messages
+        self._write_lines(session_file, 15, append=True)
+
+        new_messages: list = []
+        with patch("ccgram.session_monitor.get_timeline", return_value=AsyncMock()):
+            await monitor._process_session_file(
+                "nonfresh-over", session_file, new_messages
+            )
+
+        notice_msgs = [m for m in new_messages if "\U0001f504" in m.text]
+        regular_msgs = [m for m in new_messages if "\U0001f504" not in m.text]
+        assert len(notice_msgs) == 1, f"Expected 1 notice, got {notice_msgs}"
+        assert len(regular_msgs) == 10, f"Expected 10 msgs, got {len(regular_msgs)}"
+        assert "skipped 5" in notice_msgs[0].text
+        assert "showing last 10" in notice_msgs[0].text
+
+    async def test_nonfresh_under_cap_no_notice(self, tmp_path, monkeypatch) -> None:
+        """Non-fresh scan, 5 msgs <= cap=10 → 5 deliveries, no notice."""
+        import ccgram.session_monitor as sm
+
+        monkeypatch.setenv("CCGRAM_CATCHUP_CAP", "10")
+        monkeypatch.setattr(sm, "_CATCHUP_CAP", 10)
+        sm._catchup_notice_last.clear()
+
+        session_file = tmp_path / "transcript.jsonl"
+        self._write_lines(session_file, 1)
+        non_zero_offset = session_file.stat().st_size
+
+        monitor = SessionMonitor(
+            projects_path=tmp_path / "projects",
+            state_file=tmp_path / "ms.json",
+        )
+        tracked = TrackedSession(
+            session_id="nonfresh-under",
+            file_path=str(session_file),
+            last_byte_offset=non_zero_offset,
+        )
+        monitor.state.update_session(tracked)
+        monitor._file_mtimes["nonfresh-under"] = 0.0
+
+        self._write_lines(session_file, 5, append=True)
+
+        new_messages: list = []
+        with patch("ccgram.session_monitor.get_timeline", return_value=AsyncMock()):
+            await monitor._process_session_file(
+                "nonfresh-under", session_file, new_messages
+            )
+
+        assert len(new_messages) == 5
+        assert not any("\U0001f504" in m.text for m in new_messages)
+
+    async def test_debounce_second_catchup_silent(self, tmp_path, monkeypatch) -> None:
+        """Two consecutive non-fresh catch-ups within 30s → only first emits notice."""
+        import ccgram.session_monitor as sm
+
+        monkeypatch.setenv("CCGRAM_CATCHUP_CAP", "10")
+        monkeypatch.setattr(sm, "_CATCHUP_CAP", 10)
+        sm._catchup_notice_last.clear()
+
+        session_file = tmp_path / "transcript.jsonl"
+        self._write_lines(session_file, 1)
+        non_zero_offset = session_file.stat().st_size
+
+        monitor = SessionMonitor(
+            projects_path=tmp_path / "projects",
+            state_file=tmp_path / "ms.json",
+        )
+        tracked = TrackedSession(
+            session_id="debounce-sess",
+            file_path=str(session_file),
+            last_byte_offset=non_zero_offset,
+        )
+        monitor.state.update_session(tracked)
+        monitor._file_mtimes["debounce-sess"] = 0.0
+
+        # First batch: 15 msgs (over cap) → notice expected
+        self._write_lines(session_file, 15, append=True)
+        msgs1: list = []
+        with patch("ccgram.session_monitor.get_timeline", return_value=AsyncMock()):
+            await monitor._process_session_file(
+                "debounce-sess", session_file, msgs1
+            )
+
+        notice1 = [m for m in msgs1 if "\U0001f504" in m.text]
+        assert len(notice1) == 1, "First catch-up should emit notice"
+
+        # Second batch within debounce window: 15 more msgs → no notice
+        monitor._file_mtimes["debounce-sess"] = 0.0
+        self._write_lines(session_file, 15, append=True)
+        msgs2: list = []
+        with patch("ccgram.session_monitor.get_timeline", return_value=AsyncMock()):
+            await monitor._process_session_file(
+                "debounce-sess", session_file, msgs2
+            )
+
+        notice2 = [m for m in msgs2 if "\U0001f504" in m.text]
+        assert len(notice2) == 0, "Second catch-up within 60s must NOT emit notice"

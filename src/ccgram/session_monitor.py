@@ -13,6 +13,7 @@ Key classes: SessionMonitor, NewMessage, SessionInfo.
 
 import asyncio
 import json
+import os
 import structlog
 import time
 from dataclasses import dataclass
@@ -55,6 +56,14 @@ _PathResolveError = (OSError, ValueError)
 _SessionMapError = (json.JSONDecodeError, OSError)
 
 _MSG_PREVIEW_LENGTH = 80
+
+# Catch-up playback cap: when resuming from a non-zero offset and the batch
+# of assistant-text messages exceeds this threshold, only ship the last N and
+# emit one summary notice. Configurable via CCGRAM_CATCHUP_CAP env var.
+_CATCHUP_CAP: int = int(os.environ.get("CCGRAM_CATCHUP_CAP", "10"))
+# Per-session: monotonic time of last "caught up" notice (debounce 60s).
+_catchup_notice_last: dict[str, float] = {}  # session_id -> monotonic
+_CATCHUP_DEBOUNCE_SECS: float = 60.0
 
 # How often reconcile_session_map() actually does work, regardless of how
 # often the monitor loop calls it. Rate-limits project-dir scans so we don't
@@ -657,9 +666,13 @@ class SessionMonitor:
             if current_mtime <= last_mtime:
                 return
 
-        # File changed, read new content from last offset
+        # File changed, read new content from last offset.
+        # Capture offset BEFORE reading so we can tell if this is a fresh-start
+        # scan (offset was 0) vs. a catch-up after a gap (offset was non-zero).
+        offset_before_read = tracked.last_byte_offset
         new_entries = await self._read_new_lines(tracked, file_path, window_id)
         self._file_mtimes[session_id] = current_mtime
+
 
         # Record transcript activity for status heuristic
         if new_entries:
@@ -696,9 +709,48 @@ class SessionMonitor:
                     break
 
         _tl = get_timeline()
-        for entry in agent_messages:
-            if not entry.text:
-                continue
+
+        # Catch-up cap: when resuming after a gap, avoid flooding with stale msgs.
+        with_text = [e for e in agent_messages if e.text]
+        assistant_text_entries = [
+            e for e in with_text if e.role == 'assistant' and e.content_type == 'text'
+        ]
+
+        notice: NewMessage | None = None
+        if offset_before_read != 0 and len(assistant_text_entries) > _CATCHUP_CAP:
+            skipped = len(assistant_text_entries) - _CATCHUP_CAP
+            _now = time.monotonic()
+            _last = _catchup_notice_last.get(session_id, 0.0)
+            if _now - _last >= _CATCHUP_DEBOUNCE_SECS:
+                _catchup_notice_last[session_id] = _now
+                _last_active = self._last_activity.get(session_id)
+                if _last_active is not None:
+                    _mins = max(1, int((_now - _last_active) / 60))
+                    _elapsed = f'{_mins}m'
+                else:
+                    _elapsed = 'a gap'
+                notice = NewMessage(
+                    session_id=session_id,
+                    text=(
+                        f'🔄 Caught up after {_elapsed} — skipped {skipped} earlier'
+                        f' messages, showing last {_CATCHUP_CAP}:'
+                    ),
+                    is_complete=True,
+                    content_type='text',
+                    role='assistant',
+                )
+            # Trim: keep all non-assistant-text entries + last _CATCHUP_CAP assistant-text.
+            keep_ids = {id(e) for e in assistant_text_entries[-_CATCHUP_CAP:]}
+            with_text = [
+                e
+                for e in with_text
+                if e.content_type != 'text' or e.role != 'assistant' or id(e) in keep_ids
+            ]
+
+        if notice is not None:
+            new_messages.append(notice)
+
+        for entry in with_text:
             new_messages.append(
                 NewMessage(
                     session_id=session_id,
