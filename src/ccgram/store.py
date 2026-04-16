@@ -26,6 +26,7 @@ Schema versions:
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -306,6 +307,48 @@ def _apply_v3_schema_additions(conn: sqlite3.Connection) -> None:
     logger.info("schema migration v3: schema additions applied")
 
 
+def _backfill_null_user_ids(conn: sqlite3.Connection, summary: dict[str, Any]) -> None:
+    """Step 5 of migrate_to_v3: backfill user_id=NULL rows from ALLOWED_USERS env."""
+    null_rows = conn.execute(
+        "SELECT topic_id FROM topic_bindings WHERE user_id IS NULL"
+    ).fetchall()
+    if not null_rows:
+        return
+    allowed_users_raw = os.getenv("ALLOWED_USERS", "")
+    allowed_ids: list[int] = []
+    for part in allowed_users_raw.split(","):
+        part = part.strip()
+        if part:
+            try:
+                allowed_ids.append(int(part))
+            except ValueError:
+                pass
+    null_topic_ids = [r["topic_id"] for r in null_rows]
+    if len(allowed_ids) == 1:
+        uid = allowed_ids[0]
+        cur = conn.execute(
+            "UPDATE topic_bindings SET user_id = ? WHERE user_id IS NULL", (uid,)
+        )
+        count = cur.rowcount
+        logger.info(
+            "migrate_to_v3: backfilled user_id=%d for %d topic_binding row(s)",
+            uid, count,
+        )
+        summary["user_ids_set"] += count
+    elif len(allowed_ids) == 0:
+        logger.warning(
+            "migrate_to_v3: %d topic_binding row(s) still have user_id=NULL "
+            "and ALLOWED_USERS is empty — topic_ids: %s",
+            len(null_topic_ids), null_topic_ids,
+        )
+    else:
+        logger.warning(
+            "migrate_to_v3: %d topic_binding row(s) still have user_id=NULL "
+            "and ALLOWED_USERS is ambiguous (%d users) — topic_ids: %s",
+            len(null_topic_ids), len(allowed_ids), null_topic_ids,
+        )
+
+
 def migrate_to_v3(db: "str | Path", state_json: "str | Path") -> dict[str, Any]:
     """Migrate state.json routing data into the v3 DB schema.
 
@@ -436,6 +479,9 @@ def migrate_to_v3(db: "str | Path", state_json: "str | Path") -> dict[str, Any]:
             )
             if conn.execute("SELECT changes()").fetchone()[0]:
                 summary["display_name_prefs_inserted"] += 1
+
+        # 5. Backfill user_id=NULL rows from ALLOWED_USERS env var
+        _backfill_null_user_ids(conn, summary)
 
         conn.commit()
     except Exception:
