@@ -129,7 +129,16 @@ async def test_window_state_survives_reload(make_session_manager) -> None:
 
 
 async def test_duplicate_bindings_deduped_on_load(tmp_path, monkeypatch) -> None:
-    """Old state with duplicate bindings — loader keeps highest thread_id."""
+    """Phase 4: old thread_bindings in state.json are migrated out on first load.
+
+    The migration strips thread_bindings from state.json (and into the DB
+    where possible).  With no matching topic_binding rows in the DB, the
+    migration summary shows 0 rows updated and the in-memory router is
+    empty.  The old JSON-roundtrip dedup path is replaced by the DB path.
+    """
+    import time as _t
+    from ccgram import store
+
     state = {
         "window_states": {},
         "user_window_offsets": {},
@@ -140,11 +149,24 @@ async def test_duplicate_bindings_deduped_on_load(tmp_path, monkeypatch) -> None
     }
     sf = tmp_path / "state.json"
     sf.write_text(json.dumps(state))
+
+    db_path = tmp_path / "state.db"
+    store.init_db(db_path)
+    monkeypatch.setattr(store, "db_path", lambda: db_path)
     monkeypatch.setattr("ccgram.config.config.state_file", sf)
     monkeypatch.setattr(
         "ccgram.config.config.session_map_file", tmp_path / "session_map.json"
     )
 
+    # Phase 4: thread_bindings in state.json are stripped on first boot.
+    # Without DB topic_bindings, the router is empty after load.
     SessionManager()
+    # Both bindings are gone — migration stripped state.json
     assert thread_router.get_window_for_thread(1, 10) is None
-    assert thread_router.get_window_for_thread(1, 20) == "@0"
+    assert thread_router.get_window_for_thread(1, 20) is None
+
+    # Verify state.json was rewritten with only KEEP fields
+    import json as _j
+    remaining = _j.loads(sf.read_text())
+    assert "thread_bindings" not in remaining
+    assert "user_window_offsets" in remaining

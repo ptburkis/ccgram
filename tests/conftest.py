@@ -19,10 +19,13 @@ os.environ["CCGRAM_DIR"] = tempfile.mkdtemp(prefix="ccgram-test-")
 @pytest.fixture(autouse=True)
 def _clear_window_store():
     from ccgram.claude_task_state import claude_task_state
+    from ccgram.thread_router import thread_router
     from ccgram.window_state_store import window_store
 
     claude_task_state.reset()
     window_store.window_states.clear()
+    thread_router.reset()
     yield
     claude_task_state.reset()
     window_store.window_states.clear()
+    thread_router.reset()

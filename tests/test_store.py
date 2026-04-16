@@ -65,6 +65,7 @@ class TestSchema:
             "crons",
             "user_prefs",
             "schema_meta",
+            "window_modes",
         }
         assert required <= set(names)
 
@@ -437,22 +438,22 @@ class TestMigration:
         with store.connect(db_path) as c:
             snap2 = store.dump_all(c)
 
-        # Compare table by table ignoring updated_at timestamps on user_prefs
+        # Compare table by table ignoring updated_at timestamps on user_prefs and
+        # window_id on topic_bindings (populated from sessions on second migration run).
+        _IGNORE = {"user_prefs": {"updated_at"}, "topic_bindings": {"window_id"}}
         for tbl in snap1:
-            if tbl == "user_prefs":
+            ignore_keys = _IGNORE.get(tbl, set())
+            if ignore_keys:
+                sort_key = (lambda r: (r.get("scope",""), r.get("scope_id",""), r.get("key",""))
+                            if tbl == "user_prefs"
+                            else lambda r: (r.get("group_id", 0), r.get("topic_id", 0)))
                 rows1 = sorted(
-                    [
-                        {k: v for k, v in r.items() if k != "updated_at"}
-                        for r in snap1[tbl]
-                    ],
-                    key=lambda r: (r["scope"], r["scope_id"], r["key"]),
+                    [{k: v for k, v in r.items() if k not in ignore_keys} for r in snap1[tbl]],
+                    key=sort_key,
                 )
                 rows2 = sorted(
-                    [
-                        {k: v for k, v in r.items() if k != "updated_at"}
-                        for r in snap2[tbl]
-                    ],
-                    key=lambda r: (r["scope"], r["scope_id"], r["key"]),
+                    [{k: v for k, v in r.items() if k not in ignore_keys} for r in snap2[tbl]],
+                    key=sort_key,
                 )
                 assert rows1 == rows2, f"Table {tbl} differs after second migration"
             else:
@@ -560,7 +561,7 @@ class TestSchemaV2Migration:
             version = c.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()
-            assert version[0] == "2"
+            assert version[0] == "3"  # v1 gets fully migrated to current version
 
     def test_migration_is_idempotent(self, tmp_path):
         db = tmp_path / "v2.db"
@@ -570,7 +571,7 @@ class TestSchemaV2Migration:
             version = c.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()
-            assert version[0] == "2"
+            assert version[0] == "3"  # current version
 
 
 # ---- TestCronV2Fields --------------------------------------------------------
@@ -697,3 +698,122 @@ class TestResolveCronTarget:
         cron = self._cron(target_window="")
         result = store.resolve_cron_target(cron, conn)
         assert result is None
+
+
+# ---- TestWindowModes ---------------------------------------------------------
+
+
+class TestWindowModes:
+    def test_upsert_get_roundtrip(self, conn):
+        store.upsert_window_modes(conn, "@1", approval_mode="normal", batch_mode="verbose",
+                                  notification_mode="all", provider_name="claude",
+                                  external=False)
+        m = store.get_window_modes(conn, "@1")
+        assert m["window_id"] == "@1"
+        assert m["approval_mode"] == "normal"
+        assert m["batch_mode"] == "verbose"
+        assert m["notification_mode"] == "all"
+        assert m["provider_name"] == "claude"
+        assert m["external"] is False
+
+    def test_get_missing_returns_empty(self, conn):
+        m = store.get_window_modes(conn, "@99")
+        assert m == {}
+
+    def test_upsert_partial_update(self, conn):
+        store.upsert_window_modes(conn, "@2", approval_mode="yolo")
+        store.upsert_window_modes(conn, "@2", batch_mode="verbose")
+        m = store.get_window_modes(conn, "@2")
+        assert m["approval_mode"] == "yolo"
+        assert m["batch_mode"] == "verbose"
+
+    def test_delete_window_modes(self, conn):
+        store.upsert_window_modes(conn, "@3", approval_mode="normal")
+        n = store.delete_window_modes(conn, "@3")
+        assert n == 1
+        assert store.get_window_modes(conn, "@3") == {}
+
+    def test_delete_missing_returns_zero(self, conn):
+        assert store.delete_window_modes(conn, "@99") == 0
+
+    def test_list_window_modes(self, conn):
+        store.upsert_window_modes(conn, "@1")
+        store.upsert_window_modes(conn, "@2")
+        modes = store.list_window_modes(conn)
+        assert len(modes) == 2
+        wids = {m["window_id"] for m in modes}
+        assert "@1" in wids
+        assert "@2" in wids
+
+    def test_external_bool_roundtrip(self, conn):
+        store.upsert_window_modes(conn, "@5", external=True)
+        m = store.get_window_modes(conn, "@5")
+        assert m["external"] is True
+
+
+# ---- TestTopicBindingV3Fields ------------------------------------------------
+
+
+class TestTopicBindingV3Fields:
+    def _session(self, conn, sid, window_id):
+        store.upsert_session(conn, session_id=sid, cwd="/c", agent="claude",
+                             status="active", window_id=window_id, created_at=0)
+
+    def test_upsert_topic_binding_full_roundtrip(self, conn):
+        self._session(conn, "s1", "@1")
+        import time as _t
+        store.upsert_topic_binding_full(conn, -100, 10, "s1", 1234, "@1",
+                                        "mytopic", int(_t.time()))
+        b = store.get_topic_binding(conn, -100, 10)
+        assert b is not None
+        assert b.user_id == 1234
+        assert b.window_id == "@1"
+
+    def test_get_window_id_for_topic(self, conn):
+        self._session(conn, "s2", "@2")
+        import time as _t
+        store.upsert_topic_binding_full(conn, -100, 20, "s2", 9999, "@2",
+                                        "t", int(_t.time()))
+        assert store.get_window_id_for_topic(conn, -100, 20) == "@2"
+
+    def test_get_window_id_for_topic_missing(self, conn):
+        assert store.get_window_id_for_topic(conn, -100, 999) is None
+
+    def test_find_topic_for_window(self, conn):
+        self._session(conn, "s3", "@3")
+        import time as _t
+        store.upsert_topic_binding_full(conn, -100, 30, "s3", 555, "@3",
+                                        "t", int(_t.time()))
+        result = store.find_topic_for_window(conn, 555, "@3")
+        assert result == (-100, 30)
+
+    def test_find_topic_for_window_missing(self, conn):
+        assert store.find_topic_for_window(conn, 555, "@99") is None
+
+    def test_iter_thread_bindings_db(self, conn):
+        self._session(conn, "sa", "@a")
+        self._session(conn, "sb", "@b")
+        import time as _t
+        now = int(_t.time())
+        store.upsert_topic_binding_full(conn, -100, 1, "sa", 111, "@a", "t1", now)
+        store.upsert_topic_binding_full(conn, -100, 2, "sb", 222, "@b", "t2", now)
+        results = list(store.iter_thread_bindings_db(conn))
+        assert (111, 1, "@a") in results
+        assert (222, 2, "@b") in results
+
+    def test_iter_thread_bindings_db_skips_null(self, conn):
+        self._session(conn, "sc", "@c")
+        store.upsert_topic_binding(conn, group_id=-100, topic_id=99,
+                                   session_id="sc", topic_title="T")
+        results = list(store.iter_thread_bindings_db(conn))
+        assert all(r[0] is not None and r[2] is not None for r in results)
+
+    def test_schema_v3_has_tables_and_indexes(self, conn):
+        tables = store.table_names(conn)
+        assert "window_modes" in tables
+        idx_rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+        idx_names = {r["name"] for r in idx_rows}
+        assert "idx_topic_bindings_user_topic" in idx_names
+        assert "idx_topic_bindings_window" in idx_names

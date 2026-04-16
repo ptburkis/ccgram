@@ -4,6 +4,13 @@ Maps Telegram topics (user_id + thread_id) to tmux windows (window_id)
 bidirectionally.  Manages group chat IDs for multi-group forum topic
 routing and display names for windows.
 
+Phase 4: All mutations are written synchronously to the SQLite DB via
+store helpers.  The in-memory dicts are retained as a fast in-process
+cache and for backward compat with callers that read them directly.
+``to_dict()`` returns an empty dict (session.py no longer serialises
+routing state to state.json).  ``from_dict()`` is a no-op (startup
+uses _load_state_from_db via session.py instead).
+
 Key class: ThreadRouter (singleton instantiated as ``thread_router``).
 Key data:
   - thread_bindings  (user_id -> {thread_id -> window_id})
@@ -22,14 +29,23 @@ from typing import Any
 logger = structlog.get_logger()
 
 
+def _get_conn():
+    """Open a short-lived DB connection via store.connect()."""
+    from . import store
+    return store.connect()
+
+
 @dataclass
 class ThreadRouter:
     """Bidirectional mapping between Telegram topics and tmux windows.
 
     Owns thread_bindings, group_chat_ids, window_display_names, and
-    the reverse index _window_to_thread.  Persistence is delegated:
-    the ``_schedule_save`` callback (set by SessionManager) triggers
-    a debounced save after mutations.
+    the reverse index _window_to_thread.  All mutations write through
+    to the SQLite DB synchronously (Phase 4).  In-memory dicts remain
+    as a fast cache for the current process lifetime.
+
+    ``_schedule_save`` is a no-op callback kept for API compat — DB
+    writes are synchronous, no debounce needed.
     """
 
     thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
@@ -87,34 +103,26 @@ class ThreadRouter:
                             )
 
     # ------------------------------------------------------------------
-    # Serialization
+    # Serialization (Phase 4: no-op — DB is authoritative)
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize routing state for state.json persistence."""
-        return {
-            "thread_bindings": {
-                str(uid): {str(tid): wid for tid, wid in bindings.items()}
-                for uid, bindings in self.thread_bindings.items()
-            },
-            "group_chat_ids": self.group_chat_ids,
-            "window_display_names": self.window_display_names,
-        }
+        """Return empty dict — routing state is now persisted in SQLite.
+
+        session.py calls this during state serialisation; returning an
+        empty dict means thread routing data is no longer written to
+        state.json.
+        """
+        return {}
 
     def from_dict(self, data: dict[str, Any]) -> None:
-        """Restore routing state from persisted data.
+        """No-op — startup state is loaded from DB by session.py.
 
-        Does NOT call ``_schedule_save`` — loading from disk must not
-        trigger a write.
+        The in-memory dicts (thread_bindings etc.) are populated by
+        SessionManager._load_state_from_db(), which reads from the
+        topic_bindings and user_prefs tables.  This method is kept for
+        API compatibility but does nothing in Phase 4.
         """
-        self.thread_bindings = {
-            int(uid): {int(tid): wid for tid, wid in bindings.items()}
-            for uid, bindings in data.get("thread_bindings", {}).items()
-        }
-        self.group_chat_ids = data.get("group_chat_ids", {})
-        self.window_display_names = data.get("window_display_names", {})
-        self._dedup_thread_bindings()
-        self._rebuild_reverse_index()
 
     # ------------------------------------------------------------------
     # Thread binding operations
@@ -125,8 +133,8 @@ class ThreadRouter:
     ) -> None:
         """Bind a Telegram topic thread to a tmux window.
 
-        Enforces 1 topic = 1 window: if another thread is already bound to
-        the same window_id, that stale binding is removed first.
+        Writes through to DB (topic_bindings.user_id + window_id) and
+        maintains in-memory cache.  Enforces 1 topic = 1 window.
         """
         if user_id not in self.thread_bindings:
             self.thread_bindings[user_id] = {}
@@ -156,6 +164,13 @@ class ThreadRouter:
         self._window_to_thread[(user_id, window_id)] = thread_id
         if window_name:
             self.window_display_names[window_id] = window_name
+
+        # Write through to DB: update user_id and window_id on the binding row
+        self._db_write_binding(user_id, thread_id, window_id)
+        # Store display name in user_prefs
+        if window_name:
+            self._db_write_display_name(window_id, window_name)
+
         self._schedule_save()
         display = window_name or self.get_display_name(window_id)
         logger.info(
@@ -166,12 +181,55 @@ class ThreadRouter:
             user_id,
         )
 
+    def _db_write_binding(self, user_id: int, thread_id: int, window_id: str) -> None:
+        """Update topic_bindings.user_id and window_id for the given topic_id."""
+        try:
+            with _get_conn() as conn:
+                conn.execute(
+                    """UPDATE topic_bindings
+                       SET user_id = ?, window_id = ?
+                       WHERE topic_id = ?""",
+                    (user_id, window_id, thread_id),
+                )
+        except Exception:
+            logger.debug("bind_thread: DB write failed for thread %d", thread_id, exc_info=True)
+
+    def _db_clear_binding(self, thread_id: int) -> None:
+        """Clear user_id and window_id on the topic_binding for topic_id."""
+        try:
+            with _get_conn() as conn:
+                conn.execute(
+                    """UPDATE topic_bindings
+                       SET user_id = NULL, window_id = NULL
+                       WHERE topic_id = ?""",
+                    (thread_id,),
+                )
+        except Exception:
+            logger.debug("unbind_thread: DB write failed for thread %d", thread_id, exc_info=True)
+
+    def _db_write_display_name(self, window_id: str, name: str) -> None:
+        """Persist display name in user_prefs(scope='window_name')."""
+        try:
+            from . import store
+            with _get_conn() as conn:
+                store.set_pref(conn, "window_name", "display_name", name, scope_id=window_id)
+        except Exception:
+            logger.debug("display_name: DB write failed for %s", window_id, exc_info=True)
+
+    def _db_write_group_chat_id(self, key: str, chat_id: int) -> None:
+        """Persist group_chat_id in user_prefs(scope='group_chat')."""
+        try:
+            from . import store
+            with _get_conn() as conn:
+                store.set_pref(conn, "group_chat", "chat_id", chat_id, scope_id=key)
+        except Exception:
+            logger.debug("group_chat_id: DB write failed for key %s", key, exc_info=True)
+
     def unbind_thread(self, user_id: int, thread_id: int) -> str | None:
         """Remove a thread binding.  Returns the previously bound window_id.
 
-        Cleans up the reverse index and group_chat_id.  Does NOT touch
-        display names — the caller (SessionManager) handles display-name
-        lifecycle because it requires window_states knowledge.
+        Clears user_id and window_id on the topic_binding row (keeps
+        session_id for history).  Cleans up in-memory caches.
         """
         bindings = self.thread_bindings.get(user_id)
         if not bindings or thread_id not in bindings:
@@ -199,6 +257,9 @@ class ThreadRouter:
         )
         if not still_bound and not self._has_window_state(window_id):
             self.window_display_names.pop(window_id, None)
+
+        # Write through to DB
+        self._db_clear_binding(thread_id)
 
         self._schedule_save()
         return window_id
@@ -249,11 +310,12 @@ class ThreadRouter:
         """Store the group chat ID for a user's thread.
 
         Uses composite key ``user_id:thread_id`` to support multiple
-        groups per user.
+        groups per user.  Writes through to user_prefs DB.
         """
         key = f"{user_id}:{thread_id}"
         if self.group_chat_ids.get(key) != chat_id:
             self.group_chat_ids[key] = chat_id
+            self._db_write_group_chat_id(key, chat_id)
             self._schedule_save()
             logger.info(
                 "Stored group chat_id %d for user %d, thread %d",
@@ -300,6 +362,7 @@ class ThreadRouter:
         """Update display name for a window_id."""
         if self.window_display_names.get(window_id) != window_name:
             self.window_display_names[window_id] = window_name
+            self._db_write_display_name(window_id, window_name)
             self._schedule_save()
 
     def sync_display_names(self, live_windows: list[tuple[str, str]]) -> bool:

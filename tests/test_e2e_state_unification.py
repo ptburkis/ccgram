@@ -232,3 +232,45 @@ async def test_e2e_three_sessions_reconcile_delete(ccgram_home, monkeypatch):
         session_identity_fetcher=lambda: {},
     )
     assert report.issues == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 extension: bind_thread → DB update → get_window_for_thread no I/O
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    os.environ.get("CCGRAM_RUN_INTEGRATION") != "1",
+    reason="integration test — set CCGRAM_RUN_INTEGRATION=1 to run",
+)
+def test_bind_then_get_without_save_load(tmp_path, monkeypatch):
+    """Bind a thread, then verify get_window_for_thread returns the right value
+    without any intervening save/load cycle (confirms in-memory cache works)."""
+    import time as _t
+    from ccgram import store
+    from ccgram.thread_router import ThreadRouter
+
+    db = tmp_path / "state.db"
+    store.init_db(db)
+    monkeypatch.setattr(store, "db_path", lambda: db)
+
+    now = int(_t.time())
+    with store.connect(db) as conn:
+        store.upsert_session(conn, session_id="sid-e2e", cwd="/c", agent="claude",
+                              status="active", window_id="@e2e", created_at=now)
+        store.upsert_topic_binding_full(conn, -100, 500, "sid-e2e",
+                                        9876, "@e2e", "e2e-topic", now)
+
+    router = ThreadRouter()
+    router.bind_thread(9876, 500, "@e2e")
+
+    # No save/load — just check in-memory
+    assert router.get_window_for_thread(9876, 500) == "@e2e"
+    assert router.resolve_window_for_thread(9876, 500) == "@e2e"
+
+    # Also verify DB was updated
+    with store.connect(db) as conn:
+        b = store.get_topic_binding(conn, -100, 500)
+    assert b is not None
+    assert b.user_id == 9876
+    assert b.window_id == "@e2e"

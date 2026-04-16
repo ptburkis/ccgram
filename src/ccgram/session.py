@@ -197,11 +197,12 @@ class SessionManager:
         self._load_state()
 
     def _serialize_state(self) -> dict[str, Any]:
-        """Serialize all state to a dict for persistence."""
-        result = {"window_states": window_store.to_dict()}
-        result.update(user_preferences.to_dict())
-        result.update(thread_router.to_dict())
-        return result
+        """Serialize KEEP fields to a dict for state.json persistence.
+
+        Phase 4: only user_window_offsets and user_dir_favorites are kept
+        in state.json.  window_states and routing data live in SQLite.
+        """
+        return user_preferences.to_dict()
 
     def _save_state(self) -> None:
         """Schedule debounced save (0.5s delay, resets on each call)."""
@@ -319,6 +320,51 @@ class SessionManager:
         )
         return True
 
+    def _migrate_state_json_to_db(self) -> None:
+        """Migrate routing data from state.json into the v3 DB schema.
+
+        Called once on first boot at schema v3 if state.json still contains
+        routing fields.  After migration, state.json is rewritten containing
+        only the KEEP fields (user_window_offsets, user_dir_favorites).
+        """
+        import json as _json
+        from . import store as _store
+
+        state_path = config.state_file
+        if not state_path.exists():
+            return
+
+        try:
+            raw = _json.loads(state_path.read_text())
+        except (_json.JSONDecodeError, OSError):
+            return
+
+        # Only run if there are routing fields present to migrate
+        has_routing = any(k in raw for k in ("thread_bindings", "window_states",
+                                              "group_chat_ids", "window_display_names"))
+        if not has_routing:
+            return
+
+        try:
+            summary = _store.migrate_to_v3(_store.db_path(), state_path)
+        except Exception:
+            logger.exception("Failed to migrate state.json to DB")
+            return
+
+        logger.info("state.json v3 migration complete: %s", summary)
+
+        # Rewrite state.json with only the KEEP fields
+        keep = {
+            "user_window_offsets": raw.get("user_window_offsets", {}),
+            "user_dir_favorites": raw.get("user_dir_favorites", {}),
+        }
+        from .utils import atomic_write_json as _awj
+        try:
+            _awj(state_path, keep)
+            logger.info("state.json stripped to KEEP fields only")
+        except OSError:
+            logger.warning("Could not rewrite state.json after v3 migration")
+
     def _load_state(self) -> None:
         """Load state during initialization.
 
@@ -330,6 +376,9 @@ class SessionManager:
         Detects old-format state (window_name keys without '@' prefix) and
         marks for migration on next startup re-resolution.
         """
+        # Phase 4: run state.json → DB migration before loading, if needed.
+        self._migrate_state_json_to_db()
+
         if self._load_state_from_db():
             return
 
@@ -339,12 +388,11 @@ class SessionManager:
         if not state:
             return
 
-        window_store.from_dict(state.get("window_states", {}))
-
-        # Load user preferences (starred dirs, MRU, read offsets)
+        # Phase 4: window_states and routing are in the DB; state.json now only
+        # contains user_window_offsets and user_dir_favorites.
         user_preferences.from_dict(state)
 
-        # Load routing data into ThreadRouter (handles dedup + reverse index)
+        # Load routing data — from_dict is a no-op in Phase 4; left for compat
         thread_router.from_dict(state)
 
         # Detect old format: keys that don't look like window IDs

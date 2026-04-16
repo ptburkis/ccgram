@@ -9,6 +9,7 @@ Schema overview:
 - ``heartbeats``     — liveness beacons from long-running components
 - ``crons``          — scheduled message definitions
 - ``user_prefs``     — generic KV store for per-scope user preferences
+- ``window_modes``   — per-window mode settings (approval, batch, notification)
 
 Schema decision for prefs — single KV table instead of per-feature tables:
 The data is heterogeneous (display flags, directory favorites, read offsets), rarely
@@ -20,12 +21,14 @@ individual fields can be promoted to structured tables in a follow-up migration.
 Schema versions:
   1 — initial schema (sessions, topic_bindings, orphaned_topics, heartbeats, crons, user_prefs)
   2 — crons: added target_session_id, target_topic_id, target_group_id columns
+  3 — topic_bindings: added user_id, window_id; new window_modes table
 """
 
 import json
 import logging
 import sqlite3
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # ---- Schema ------------------------------------------------------------------
 
-_SCHEMA_VERSION = "2"
+_SCHEMA_VERSION = "3"
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -64,6 +67,8 @@ CREATE TABLE IF NOT EXISTS topic_bindings (
     session_id  TEXT    NOT NULL UNIQUE,
     topic_title TEXT    NOT NULL,
     bound_at    INTEGER NOT NULL,
+    user_id     INTEGER,
+    window_id   TEXT,
     PRIMARY KEY (group_id, topic_id),
     FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
@@ -109,6 +114,16 @@ CREATE TABLE IF NOT EXISTS user_prefs (
     PRIMARY KEY (scope, scope_id, key)
 );
 CREATE INDEX IF NOT EXISTS idx_user_prefs_scope ON user_prefs(scope);
+
+CREATE TABLE IF NOT EXISTS window_modes (
+    window_id         TEXT    PRIMARY KEY,
+    approval_mode     TEXT    NOT NULL DEFAULT 'yolo',
+    batch_mode        TEXT    NOT NULL DEFAULT 'batched',
+    notification_mode TEXT    NOT NULL DEFAULT 'summary',
+    provider_name     TEXT    NOT NULL DEFAULT '',
+    external          INTEGER NOT NULL DEFAULT 0,
+    updated_at        INTEGER NOT NULL
+);
 """
 
 # ---- Dataclasses -------------------------------------------------------------
@@ -137,6 +152,22 @@ class TopicBinding:
     session_id: str
     topic_title: str
     bound_at: int
+    # v3: routing fields (may be None for rows written before migration)
+    user_id: int | None = None
+    window_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WindowModes:
+    """Row from the ``window_modes`` table."""
+
+    window_id: str
+    approval_mode: str
+    batch_mode: str
+    notification_mode: str
+    provider_name: str
+    external: bool
+    updated_at: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +224,16 @@ _V2_ALTERS = [
     ("target_group_id", "ALTER TABLE crons ADD COLUMN target_group_id INTEGER"),
 ]
 
+_V3_TOPIC_ALTERS = [
+    ("user_id", "ALTER TABLE topic_bindings ADD COLUMN user_id INTEGER"),
+    ("window_id", "ALTER TABLE topic_bindings ADD COLUMN window_id TEXT"),
+]
+
+_V3_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_topic_bindings_user_topic ON topic_bindings(user_id, topic_id)",
+    "CREATE INDEX IF NOT EXISTS idx_topic_bindings_window ON topic_bindings(window_id)",
+]
+
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply schema migrations not yet present.  Idempotent."""
@@ -200,15 +241,211 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         "SELECT value FROM schema_meta WHERE key='schema_version'"
     ).fetchone()
     current = int(row[0]) if row else 1
-    if current >= 2:  # noqa: PLR2004
-        return
-    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(crons)").fetchall()}
-    for col, stmt in _V2_ALTERS:
-        if col not in existing_cols:
+
+    if current < 2:  # noqa: PLR2004
+        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(crons)").fetchall()}
+        for col, stmt in _V2_ALTERS:
+            if col not in existing_cols:
+                conn.execute(stmt)
+                logger.info("schema migration v2: added crons.%s", col)
+        conn.execute("UPDATE schema_meta SET value='2' WHERE key='schema_version'")
+        conn.commit()
+        current = 2
+
+    if current < 3:  # noqa: PLR2004
+        _apply_v3_schema_additions(conn)
+        conn.execute("UPDATE schema_meta SET value='3' WHERE key='schema_version'")
+        conn.commit()
+    else:
+        # Always ensure v3 additions are present (idempotent) even for new DBs
+        # that start at v3 and skip the migration block.
+        _apply_v3_schema_additions(conn)
+        conn.commit()
+
+
+def _apply_v3_schema_additions(conn: sqlite3.Connection) -> None:
+    """Apply v3 schema additions to topic_bindings and create window_modes.
+
+    Idempotent — checks existing columns before altering.
+    Does NOT migrate state.json data — that happens separately via migrate_to_v3().
+    """
+    existing_tb_cols = {r[1] for r in conn.execute("PRAGMA table_info(topic_bindings)").fetchall()}
+    for col, stmt in _V3_TOPIC_ALTERS:
+        if col not in existing_tb_cols:
             conn.execute(stmt)
-            logger.info("schema migration v2: added crons.%s", col)
-    conn.execute("UPDATE schema_meta SET value='2' WHERE key='schema_version'")
-    conn.commit()
+            logger.info("schema migration v3: added topic_bindings.%s", col)
+
+    # Populate topic_bindings.window_id from sessions table where possible.
+    # Idempotent: WHERE window_id IS NULL means it's a no-op if already populated.
+    conn.execute("""
+        UPDATE topic_bindings
+        SET window_id = (
+            SELECT s.window_id FROM sessions s
+            WHERE s.session_id = topic_bindings.session_id
+              AND s.window_id IS NOT NULL
+        )
+        WHERE window_id IS NULL
+    """)
+
+    # Create window_modes table (DDL already includes IF NOT EXISTS)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS window_modes (
+            window_id         TEXT    PRIMARY KEY,
+            approval_mode     TEXT    NOT NULL DEFAULT 'yolo',
+            batch_mode        TEXT    NOT NULL DEFAULT 'batched',
+            notification_mode TEXT    NOT NULL DEFAULT 'summary',
+            provider_name     TEXT    NOT NULL DEFAULT '',
+            external          INTEGER NOT NULL DEFAULT 0,
+            updated_at        INTEGER NOT NULL
+        )
+    """)
+
+    for stmt in _V3_INDEXES:
+        conn.execute(stmt)
+
+    logger.info("schema migration v3: schema additions applied")
+
+
+def migrate_to_v3(db: "str | Path", state_json: "str | Path") -> dict[str, Any]:
+    """Migrate state.json routing data into the v3 DB schema.
+
+    Reads thread_bindings, window_states, group_chat_ids, window_display_names
+    from state.json and upserts them into the DB.  Returns a summary dict with
+    counts of rows affected.  Safe to call on a backup DB.
+
+    This is a standalone function (not called automatically on init_db) so that
+    the caller (session.py on first v3 boot, or the dry-run verification path)
+    controls when migration happens.
+    """
+    db_path_resolved = Path(db)
+    state_path = Path(state_json)
+
+    summary: dict[str, Any] = {
+        "user_ids_set": 0,
+        "window_ids_set": 0,
+        "window_modes_inserted": 0,
+        "group_chat_prefs_inserted": 0,
+        "display_name_prefs_inserted": 0,
+    }
+
+    if not state_path.exists():
+        logger.info("migrate_to_v3: no state.json at %s — nothing to migrate", state_path)
+        return summary
+
+    try:
+        raw = json.loads(state_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("migrate_to_v3: could not read state.json: %s", exc)
+        return summary
+
+    # Ensure DB is at v3 schema
+    init_db(db_path_resolved)
+
+    conn = sqlite3.connect(str(db_path_resolved))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        now = int(time.time())
+
+        # 0. Populate window_id from sessions table where possible (fallback for
+        #    rows not covered by thread_bindings)
+        conn.execute("""
+            UPDATE topic_bindings
+            SET window_id = (
+                SELECT s.window_id FROM sessions s
+                WHERE s.session_id = topic_bindings.session_id
+                  AND s.window_id IS NOT NULL
+            )
+            WHERE window_id IS NULL
+        """)
+
+        # 1. Migrate thread_bindings → topic_bindings.user_id + window_id
+        thread_bindings: dict[str, dict[str, str]] = raw.get("thread_bindings", {})
+        for uid_str, bindings in thread_bindings.items():
+            try:
+                user_id = int(uid_str)
+            except (ValueError, TypeError):
+                continue
+            for tid_str, window_id in bindings.items():
+                try:
+                    topic_id = int(tid_str)
+                except (ValueError, TypeError):
+                    continue
+                # Find a matching topic_binding row by topic_id (no group_id in thread_bindings)
+                rows = conn.execute(
+                    "SELECT group_id, topic_id FROM topic_bindings WHERE topic_id = ?",
+                    (topic_id,),
+                ).fetchall()
+                for row in rows:
+                    conn.execute(
+                        """UPDATE topic_bindings
+                           SET user_id = ?, window_id = ?
+                           WHERE group_id = ? AND topic_id = ?
+                             AND (user_id IS NULL OR window_id IS NULL)""",
+                        (user_id, window_id, row["group_id"], row["topic_id"]),
+                    )
+                    if conn.execute("SELECT changes()").fetchone()[0]:
+                        summary["user_ids_set"] += 1
+                        summary["window_ids_set"] += 1
+
+        # 2. Migrate window_states → window_modes
+        window_states: dict[str, dict[str, Any]] = raw.get("window_states", {})
+        for wid, ws in window_states.items():
+            if not isinstance(ws, dict):
+                continue
+            approval = ws.get("approval_mode", "yolo")
+            batch = ws.get("batch_mode", "batched")
+            notif = ws.get("notification_mode", "summary")
+            # Collapse legacy notification modes
+            if notif in ("errors_only", "muted"):
+                notif = "summary"
+            provider = ws.get("provider_name", "")
+            external = int(bool(ws.get("external", False)))
+            conn.execute(
+                """INSERT INTO window_modes
+                       (window_id, approval_mode, batch_mode, notification_mode,
+                        provider_name, external, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(window_id) DO NOTHING""",
+                (wid, approval, batch, notif, provider, external, now),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0]:
+                summary["window_modes_inserted"] += 1
+
+        # 3. Migrate group_chat_ids → user_prefs(scope='group_chat')
+        group_chat_ids: dict[str, Any] = raw.get("group_chat_ids", {})
+        for key, chat_id in group_chat_ids.items():
+            # key is "user_id:thread_id", stored with scope_id='' and key=the composite key
+            conn.execute(
+                """INSERT INTO user_prefs (scope, scope_id, key, value, updated_at)
+                   VALUES ('group_chat', '', ?, ?, ?)
+                   ON CONFLICT(scope, scope_id, key) DO NOTHING""",
+                (key, json.dumps(int(chat_id)), now),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0]:
+                summary["group_chat_prefs_inserted"] += 1
+
+        # 4. Migrate window_display_names → user_prefs(scope='window_name')
+        display_names: dict[str, str] = raw.get("window_display_names", {})
+        for wid, name in display_names.items():
+            conn.execute(
+                """INSERT INTO user_prefs (scope, scope_id, key, value, updated_at)
+                   VALUES ('window_name', ?, 'display_name', ?, ?)
+                   ON CONFLICT(scope, scope_id, key) DO NOTHING""",
+                (wid, json.dumps(name), now),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0]:
+                summary["display_name_prefs_inserted"] += 1
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    logger.info("migrate_to_v3: %s", summary)
+    return summary
 
 
 def init_db(path: Path | None = None) -> Path:
@@ -389,6 +626,71 @@ def upsert_topic_binding(
     )
 
 
+def upsert_topic_binding_full(
+    conn: sqlite3.Connection,
+    group_id: int,
+    topic_id: int,
+    session_id: str,
+    user_id: int,
+    window_id: str,
+    topic_title: str,
+    bound_at: int,
+) -> None:
+    """Insert or update a topic binding with v3 user_id and window_id fields.
+
+    Positional args (no keyword-only) to mirror the verb_noun(conn, ...) convention.
+    """
+    conn.execute(
+        """
+        INSERT INTO topic_bindings
+            (group_id, topic_id, session_id, topic_title, bound_at, user_id, window_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(group_id, topic_id) DO UPDATE SET
+            session_id  = excluded.session_id,
+            topic_title = excluded.topic_title,
+            bound_at    = excluded.bound_at,
+            user_id     = excluded.user_id,
+            window_id   = excluded.window_id
+        """,
+        (group_id, topic_id, session_id, topic_title, bound_at, user_id, window_id),
+    )
+
+
+def get_window_id_for_topic(
+    conn: sqlite3.Connection, group_id: int, topic_id: int
+) -> str | None:
+    """Return the window_id bound to (group_id, topic_id), or None."""
+    row = conn.execute(
+        "SELECT window_id FROM topic_bindings WHERE group_id = ? AND topic_id = ?",
+        (group_id, topic_id),
+    ).fetchone()
+    return row["window_id"] if row else None
+
+
+def find_topic_for_window(
+    conn: sqlite3.Connection, user_id: int, window_id: str
+) -> tuple[int, int] | None:
+    """Return (group_id, topic_id) bound to this window for this user, or None."""
+    row = conn.execute(
+        "SELECT group_id, topic_id FROM topic_bindings "
+        "WHERE user_id = ? AND window_id = ?",
+        (user_id, window_id),
+    ).fetchone()
+    return (row["group_id"], row["topic_id"]) if row else None
+
+
+def iter_thread_bindings_db(
+    conn: sqlite3.Connection,
+) -> Iterator[tuple[int, int, str]]:
+    """Yield (user_id, topic_id, window_id) for all bindings with non-null window_id."""
+    rows = conn.execute(
+        "SELECT user_id, topic_id, window_id FROM topic_bindings "
+        "WHERE user_id IS NOT NULL AND window_id IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        yield int(row["user_id"]), int(row["topic_id"]), str(row["window_id"])
+
+
 def get_topic_binding(
     conn: sqlite3.Connection, group_id: int, topic_id: int
 ) -> TopicBinding | None:
@@ -444,13 +746,98 @@ def update_topic_binding_title(
 
 
 def _row_to_binding(row: sqlite3.Row) -> TopicBinding:
+    keys = row.keys() if hasattr(row, "keys") else []
     return TopicBinding(
         group_id=row["group_id"],
         topic_id=row["topic_id"],
         session_id=row["session_id"],
         topic_title=row["topic_title"],
         bound_at=row["bound_at"],
+        user_id=row["user_id"] if "user_id" in keys else None,
+        window_id=row["window_id"] if "window_id" in keys else None,
     )
+
+
+# ---- Window modes ------------------------------------------------------------
+
+
+def get_window_modes(conn: sqlite3.Connection, window_id: str) -> dict:
+    """Return window mode settings as a dict, or an empty dict if not found."""
+    row = conn.execute(
+        "SELECT * FROM window_modes WHERE window_id = ?", (window_id,)
+    ).fetchone()
+    if not row:
+        return {}
+    return {
+        "window_id": row["window_id"],
+        "approval_mode": row["approval_mode"],
+        "batch_mode": row["batch_mode"],
+        "notification_mode": row["notification_mode"],
+        "provider_name": row["provider_name"],
+        "external": bool(row["external"]),
+        "updated_at": row["updated_at"],
+    }
+
+
+def upsert_window_modes(
+    conn: sqlite3.Connection,
+    window_id: str,
+    *,
+    approval_mode: str | None = None,
+    batch_mode: str | None = None,
+    notification_mode: str | None = None,
+    provider_name: str | None = None,
+    external: bool | None = None,
+) -> None:
+    """Insert or update window mode settings.  Only provided kwargs are updated."""
+    now = int(time.time())
+    # Fetch existing row to merge
+    existing = get_window_modes(conn, window_id)
+    merged_approval = approval_mode if approval_mode is not None else existing.get("approval_mode", "yolo")
+    merged_batch = batch_mode if batch_mode is not None else existing.get("batch_mode", "batched")
+    merged_notif = notification_mode if notification_mode is not None else existing.get("notification_mode", "summary")
+    merged_provider = provider_name if provider_name is not None else existing.get("provider_name", "")
+    merged_external = int(external) if external is not None else int(existing.get("external", False))
+    conn.execute(
+        """
+        INSERT INTO window_modes
+            (window_id, approval_mode, batch_mode, notification_mode,
+             provider_name, external, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(window_id) DO UPDATE SET
+            approval_mode     = excluded.approval_mode,
+            batch_mode        = excluded.batch_mode,
+            notification_mode = excluded.notification_mode,
+            provider_name     = excluded.provider_name,
+            external          = excluded.external,
+            updated_at        = excluded.updated_at
+        """,
+        (window_id, merged_approval, merged_batch, merged_notif,
+         merged_provider, merged_external, now),
+    )
+
+
+def delete_window_modes(conn: sqlite3.Connection, window_id: str) -> int:
+    """Delete window mode row.  Returns row count (0 or 1)."""
+    cur = conn.execute("DELETE FROM window_modes WHERE window_id = ?", (window_id,))
+    return cur.rowcount
+
+
+def list_window_modes(conn: sqlite3.Connection) -> list[dict]:
+    """Return all window_modes rows as dicts."""
+    rows = conn.execute("SELECT * FROM window_modes").fetchall()
+    return [
+        {
+            "window_id": r["window_id"],
+            "approval_mode": r["approval_mode"],
+            "batch_mode": r["batch_mode"],
+            "notification_mode": r["notification_mode"],
+            "provider_name": r["provider_name"],
+            "external": bool(r["external"]),
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]
 
 
 # ---- Orphaned topics ---------------------------------------------------------

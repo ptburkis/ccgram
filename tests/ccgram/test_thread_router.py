@@ -160,32 +160,26 @@ class TestDisplayNames:
 
 
 class TestToDictRoundtrip:
-    def test_roundtrip(self, router: ThreadRouter) -> None:
+    def test_to_dict_returns_empty_in_phase4(self, router: ThreadRouter) -> None:
+        """Phase 4: to_dict() returns {} — routing state lives in SQLite, not JSON."""
         router.bind_thread(100, 1, "@1", window_name="proj")
         router.bind_thread(200, 2, "@2")
         router.set_group_chat_id(100, 1, -999)
 
         data = router.to_dict()
-        new_router = ThreadRouter()
-        new_router.from_dict(data)
+        assert data == {}
 
-        assert new_router.get_window_for_thread(100, 1) == "@1"
-        assert new_router.get_window_for_thread(200, 2) == "@2"
-        assert new_router.resolve_chat_id(100, 1) == -999
-        assert new_router.get_display_name("@1") == "proj"
-        assert new_router.get_thread_for_window(100, "@1") == 1
-
-    def test_from_dict_dedup(self, router: ThreadRouter) -> None:
+    def test_from_dict_is_noop_in_phase4(self, router: ThreadRouter) -> None:
+        """Phase 4: from_dict() is a no-op — startup loads from DB, not JSON."""
         data = {
-            "thread_bindings": {
-                "100": {"1": "@1", "2": "@1"},
-            },
+            "thread_bindings": {"100": {"1": "@1", "2": "@1"}},
             "group_chat_ids": {},
             "window_display_names": {},
         }
         router.from_dict(data)
-        assert router.get_window_for_thread(100, 2) == "@1"
+        # from_dict is a no-op: in-memory state should remain empty
         assert router.get_window_for_thread(100, 1) is None
+        assert router.get_window_for_thread(100, 2) is None
 
 
 class TestReset:
