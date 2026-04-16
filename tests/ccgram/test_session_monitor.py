@@ -212,10 +212,11 @@ class TestPerWindowProviderResolution:
         captured_window_ids = []
         original = monitor._process_session_file
 
-        async def spy(session_id, file_path, new_messages, window_id=""):
+        async def spy(session_id, file_path, new_messages, window_id="", ccgram_session_id=""):
             captured_window_ids.append(window_id)
             return await original(
-                session_id, file_path, new_messages, window_id=window_id
+                session_id, file_path, new_messages, window_id=window_id,
+                ccgram_session_id=ccgram_session_id,
             )
 
         monitor._process_session_file = spy
