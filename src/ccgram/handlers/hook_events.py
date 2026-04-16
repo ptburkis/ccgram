@@ -328,18 +328,18 @@ async def _handle_subagent_start(event: HookEvent, bot: Bot) -> None:
         name,
     )
 
-    # Post a brief notification in all modes — knowing an agent started
-    # gives the user useful context even in summary mode. The "all" mode
-    # keeps this as a status-style update; summary mode gets a single
-    # informational message per start.
-    for user_id, thread_id, _ in users:
-        await enqueue_status_update(
-            bot,
-            user_id,
-            window_id,
-            f"\U0001f916 Subagent started: {name}",
-            thread_id=thread_id,
-        )
+    # Subagent start notices are noisy (one per Task tool call). Silent by
+    # default; opt-in via CCGRAM_SUBAGENT_NOTICES=1. The ⚡ topic-name
+    # suffix below still runs so users have a passive signal of activity.
+    if os.environ.get("CCGRAM_SUBAGENT_NOTICES"):
+        for user_id, thread_id, _ in users:
+            await enqueue_status_update(
+                bot,
+                user_id,
+                window_id,
+                f"\U0001f916 Subagent started: {name}",
+                thread_id=thread_id,
+            )
 
     # Append ⚡ to topic name to indicate inline subagent is running.
     await _apply_subagent_suffix(bot, users, add=True)
@@ -370,17 +370,16 @@ async def _handle_subagent_stop(event: HookEvent, bot: Bot) -> None:
         name,
     )
 
-    # Post completion notification in all modes — pairs with the start
-    # notification so the user sees a complete start/stop trail for
-    # background agents.
-    for user_id, thread_id, _ in users:
-        await enqueue_status_update(
-            bot,
-            user_id,
-            window_id,
-            f"\U0001f916 Subagent done: {name}",
-            thread_id=thread_id,
-        )
+    # Silent by default; paired with the start-notice opt-in flag.
+    if os.environ.get("CCGRAM_SUBAGENT_NOTICES"):
+        for user_id, thread_id, _ in users:
+            await enqueue_status_update(
+                bot,
+                user_id,
+                window_id,
+                f"\U0001f916 Subagent done: {name}",
+                thread_id=thread_id,
+            )
 
     # Remove ⚡ from topic name when all subagents for this window are done.
     if not _active_subagents.get(window_id):
@@ -443,11 +442,17 @@ async def _handle_stop_failure(event: HookEvent, bot: Bot) -> None:
         error_details,
     )
 
+    # Empty/unknown error with no detail = nothing actionable for the user,
+    # just noise. Log only. Only post to the topic when there's a real
+    # error string or details to show.
+    if not error and not error_details:
+        logger.info("StopFailure suppressed (empty payload): window=%s", window_id)
+        return
     if error:
         detail = f": {error_details}" if error_details else ""
         text = f"\u26a0 API error \u2014 {error}{detail}"
     else:
-        text = "\u26a0 Agent terminated unexpectedly (no detail from Claude Code)"
+        text = f"\u26a0 Agent terminated: {error_details}"
 
     for user_id, thread_id, _window_id in users:
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)

@@ -238,9 +238,9 @@ class TestStopFailureIntentionalStop:
         send_mock.assert_not_called()
 
     @pytest.mark.asyncio()
-    async def test_fires_unknown_message_without_marker(self, stop_file, monkeypatch):
-        """StopFailure with empty payload and no marker → 'terminated unexpectedly' text."""
-        # stop_file is empty (no marker written)
+    async def test_empty_payload_suppressed_entirely(self, stop_file, monkeypatch):
+        """StopFailure with empty payload and no marker → suppressed (no send)."""
+        # Empty error AND empty error_details → nothing actionable, log only.
         monkeypatch.setattr(
             "ccgram.handlers.hook_events.thread_router.iter_thread_bindings",
             lambda: iter([(12345, 99, self.WINDOW_ID)]),
@@ -263,10 +263,7 @@ class TestStopFailureIntentionalStop:
         with patch("ccgram.handlers.message_sender.rate_limit_send_message", send_mock):
             await _handle_stop_failure(event, bot)
 
-        send_mock.assert_called_once()
-        args = send_mock.call_args[0]
-        assert "terminated unexpectedly" in args[2]
-        assert "unknown" not in args[2]
+        send_mock.assert_not_called()
 
     @pytest.mark.asyncio()
     async def test_fires_api_error_text_when_error_field_present(self, stop_file, monkeypatch):
