@@ -8,6 +8,7 @@ of relying solely on terminal scraping.
 Key function: dispatch_hook_event().
 """
 
+import time
 from collections.abc import Sequence
 
 import structlog
@@ -21,6 +22,11 @@ from ..thread_router import thread_router
 from ..topic_state_registry import topic_state
 
 logger = structlog.get_logger()
+
+# Debounce for session-rotation notices: one per window per N seconds.
+_ROTATION_NOTICE_DEBOUNCE_SECS = 30.0
+# window_id -> last-notice timestamp
+_rotation_notice_last: dict[str, float] = {}
 
 _WINDOW_KEY_PARTS = 2
 
@@ -494,6 +500,126 @@ async def _handle_task_completed(event: HookEvent, bot: Bot) -> None:
         await enqueue_status_update(bot, user_id, window_id, text, thread_id=thread_id)
 
 
+async def _handle_session_start(event: HookEvent, bot: Bot) -> None:  # noqa: C901
+    """Handle a SessionStart event — update session_map + monitor_state + DB.
+
+    Resolution order for window_id:
+    1. ``window_key`` field on the event (authoritative — hook sets it directly).
+    2. session_id reverse lookup in window_store (edge case: hook arrives with
+       previous session_id still in-flight; the window_key already has the
+       correct @N so this path is only a safety net).
+
+    After updating persistent state, ships a debounced rotation notice to the
+    bound Telegram topic.
+    """
+    from ..session_autoheal import apply_session_update
+    from ..store import (
+        connect,
+        get_binding_for_session,
+        upsert_session,
+        upsert_topic_binding,
+    )
+    from ..window_state_store import window_store
+    from .message_sender import rate_limit_send_message
+
+    window_id = _window_id_from_key(event.window_key)
+    if not window_id:
+        logger.warning(
+            "SessionStart: cannot resolve window_id from window_key=%s",
+            event.window_key,
+        )
+        return
+
+    new_sid = event.session_id
+    cwd = event.data.get("cwd", "")
+    new_transcript = event.data.get("transcript_path", "")
+
+    # Look up the old session_id from in-memory window_store for the CAS guard.
+    state = window_store.get_window_state(window_id)
+    old_sid = state.session_id or ""
+
+    if not new_sid:
+        logger.debug(
+            "SessionStart: empty session_id for window %s — skipping", window_id
+        )
+        return
+
+    if old_sid == new_sid:
+        logger.debug(
+            "SessionStart: session_id unchanged (%s) for window %s — idempotent",
+            new_sid,
+            window_id,
+        )
+        return
+
+    logger.info(
+        "SessionStart: rotation detected for %s — %s -> %s",
+        window_id,
+        old_sid or "(none)",
+        new_sid,
+    )
+
+    # Update session_map.json + monitor_state.json + in-memory session_manager.
+    await apply_session_update(
+        window_id=window_id,
+        old_sid=old_sid,
+        new_sid=new_sid,
+        new_transcript=new_transcript,
+        source="SessionStart-hook",
+    )
+
+    # Update DB: upsert new session row + re-point any existing topic binding.
+    try:
+        with connect() as conn:
+            upsert_session(
+                conn,
+                session_id=new_sid,
+                cwd=cwd,
+                agent="claude",
+                status="active",
+                window_id=window_id,
+            )
+            if old_sid:
+                old_binding = get_binding_for_session(conn, old_sid)
+                if old_binding is not None:
+                    upsert_topic_binding(
+                        conn,
+                        group_id=old_binding.group_id,
+                        topic_id=old_binding.topic_id,
+                        session_id=new_sid,
+                        topic_title=old_binding.topic_title,
+                    )
+    except (OSError, RuntimeError, ValueError):
+        logger.debug(
+            "SessionStart: DB update failed for %s", window_id, exc_info=True
+        )
+
+    # Debounced rotation notice to the bound Telegram topic (one per 30s per window).
+    now = time.monotonic()
+    last = _rotation_notice_last.get(window_id, 0.0)
+    if now - last >= _ROTATION_NOTICE_DEBOUNCE_SECS:
+        _rotation_notice_last[window_id] = now
+        users = _resolve_users_for_window_key(event.window_key)
+        for user_id, thread_id, _wid in users:
+            chat_id = thread_router.resolve_chat_id(user_id, thread_id)
+            if chat_id:
+                short_old = (old_sid[:8] + "\u2026") if old_sid else "(new)"
+                short_new = new_sid[:8] + "\u2026"
+                notice = (
+                    f"\U0001f504 Session rotated: {short_old} \u2192 {short_new}"
+                )
+                try:
+                    await rate_limit_send_message(
+                        bot, chat_id, notice, message_thread_id=thread_id
+                    )
+                except (OSError, RuntimeError):
+                    logger.debug(
+                        "SessionStart: rotation notice failed for %s",
+                        window_id,
+                        exc_info=True,
+                    )
+
+
 # Hook events that indicate the agent is actively working on something,
 # even if the main jsonl transcript isn't being written to right now
 # (e.g. during a long subagent run, or while a Bash call is in flight).
@@ -541,6 +667,8 @@ async def dispatch_hook_event(event: HookEvent, bot: Bot) -> None:
             pass
 
     match event.event_type:
+        case "SessionStart":
+            await _handle_session_start(event, bot)
         case "Notification":
             await _handle_notification(event, bot)
         case "Stop":
@@ -558,8 +686,7 @@ async def dispatch_hook_event(event: HookEvent, bot: Bot) -> None:
         case "TaskCompleted":
             await _handle_task_completed(event, bot)
         case (
-            "SessionStart"
-            | "UserPromptSubmit"
+            "UserPromptSubmit"
             | "PreToolUse"
             | "PostToolUse"
             | "PostToolUseFailure"

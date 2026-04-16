@@ -31,7 +31,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import structlog
 
@@ -41,6 +41,16 @@ if TYPE_CHECKING:
     pass  # telethon type stubs would go here if available
 
 logger = structlog.get_logger(__name__)
+
+
+class TopicMessage(NamedTuple):
+    """A single message read from a Telegram Forum topic via MTProto."""
+
+    message_id: int
+    date: datetime
+    from_bot: bool
+    text: str
+    reply_to_message_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +211,45 @@ def _to_forum_topic(raw: object) -> ForumTopic | None:
         raw=raw_dict,
     )
 
+
+def _to_topic_message(raw: object) -> "TopicMessage | None":
+    """Convert a raw Telethon message object to TopicMessage, or None if unsuitable."""
+    msg_id = getattr(raw, "id", None)
+    date_raw = getattr(raw, "date", None)
+    if msg_id is None or date_raw is None:
+        return None
+
+    if isinstance(date_raw, int):
+        date = datetime.fromtimestamp(date_raw, tz=timezone.utc)
+    elif isinstance(date_raw, datetime):
+        date = date_raw if date_raw.tzinfo else date_raw.replace(tzinfo=timezone.utc)
+    else:
+        return None
+
+    sender = getattr(raw, "sender", None)
+    # Primary: check bot flag on the resolved sender entity.
+    # GetRepliesRequest doesn't always attach sender objects unless the entity
+    # cache is primed. Fall back to via_bot_id or post_author as secondary signals.
+    if sender is not None:
+        from_bot = bool(getattr(sender, "bot", False))
+    else:
+        via_bot_id = getattr(raw, "via_bot_id", None)
+        post_author = getattr(raw, "post_author", None)
+        from_bot = bool(via_bot_id or post_author)
+    text: str = getattr(raw, "message", "") or ""
+
+    reply_to = getattr(raw, "reply_to", None)
+    reply_to_msg_id: int | None = None
+    if reply_to is not None:
+        reply_to_msg_id = getattr(reply_to, "reply_to_msg_id", None)
+
+    return TopicMessage(
+        message_id=int(msg_id),
+        date=date,
+        from_bot=from_bot,
+        text=text,
+        reply_to_message_id=reply_to_msg_id,
+    )
 
 class MTProtoClient:
     """Read-only MTProto client for Telegram Forum topic discovery.
@@ -378,3 +427,84 @@ class MTProtoClient:
             if ft is not None:
                 result.append(ft)
         return result
+
+    async def get_topic_history(
+        self,
+        group_id: int,
+        topic_id: int,
+        *,
+        limit: int = 200,
+        min_date: "datetime | None" = None,
+    ) -> "list[TopicMessage]":
+        """Fetch message history for a forum topic.
+
+        Returns messages most-recent first. Paginates automatically up to
+        ``limit``. ``min_date`` (UTC) stops pagination once messages older
+        than the cutoff are encountered.
+
+        Args:
+            group_id: Numeric Telegram group ID (negative for supergroups).
+            topic_id: The forum topic ID (== message_thread_id in Bot API).
+            limit: Maximum total messages to return.
+            min_date: Optional UTC floor — pagination stops when a message's
+                date is before this value.
+        """
+        from telethon.tl.functions.messages import GetRepliesRequest  # lazy
+
+        client = self._client
+        entity = await client.get_input_entity(group_id)  # type: ignore[union-attr]
+
+        collected: list[TopicMessage] = []
+        offset_id = 0
+        offset_date = 0
+        add_offset = 0
+        page_size = min(100, limit)
+
+        while len(collected) < limit:
+            response = await client(  # type: ignore[union-attr]
+                GetRepliesRequest(
+                    peer=entity,
+                    msg_id=topic_id,
+                    offset_id=offset_id,
+                    offset_date=offset_date,
+                    add_offset=add_offset,
+                    limit=page_size,
+                    max_id=0,
+                    min_id=0,
+                    hash=0,
+                )
+            )
+            messages = getattr(response, "messages", [])
+            if not messages:
+                break
+
+            stop = False
+            for raw in messages:
+                tm = _to_topic_message(raw)
+                if tm is None:
+                    continue
+                if min_date is not None:
+                    msg_date = tm.date
+                    if msg_date.tzinfo is None:
+                        msg_date = msg_date.replace(tzinfo=timezone.utc)
+                    if msg_date < min_date:
+                        stop = True
+                        break
+                collected.append(tm)
+                if len(collected) >= limit:
+                    stop = True
+                    break
+
+            if stop or len(messages) < page_size:
+                break
+
+            last = messages[-1]
+            offset_id = int(getattr(last, "id", 0))
+            raw_date = getattr(last, "date", None)
+            if isinstance(raw_date, int):
+                offset_date = raw_date
+            elif isinstance(raw_date, datetime):
+                offset_date = int(raw_date.timestamp())
+
+        return collected[:limit]
+

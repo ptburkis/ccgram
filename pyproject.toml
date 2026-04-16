@@ -97,7 +97,7 @@ max-statements = 60
 # Session monitor: filesystem scan with many validation branches
 "src/ccgram/session_monitor.py" = ["C901", "PLR0912"]
 # Session watcher: inotify constants use UPPER_CASE (Linux convention), pre-existing
-"src/ccgram/session_watcher.py" = ["N803", "N806", "F401", "PLR2004"]
+"src/ccgram/session_watcher.py" = ["N803", "N806", "F401", "PLR2004", "C901", "PLR0912"]
 # Bot: callback dispatch and message routing are inherently branchy
 "src/ccgram/bot.py" = ["C901", "PLR0912"]
 # Hook: CLI dispatch with multiple subcommands
@@ -112,8 +112,14 @@ max-statements = 60
 "src/ccgram/handlers/polling_coordinator.py" = ["C901", "PLR0912"]
 # Message queue: worker loop with task dispatch and error handling
 "src/ccgram/handlers/message_queue.py" = ["C901"]
+# Hook events: event router with one case per hook type
+"src/ccgram/handlers/hook_events.py" = ["C901"]
 # Directory callbacks: confirm handler with state cleanup branches
 "src/ccgram/handlers/directory_callbacks.py" = ["C901"]
+# Reconcile transcript: JSONL parsing + pagination loop are inherently branchy
+"src/ccgram/reconcile_transcript.py" = ["C901", "PLR0912"]
+# MTProto client get_topic_history: pagination loop with date/offset state
+"src/ccgram/mtproto_client.py" = ["C901"]
 # Recovery callbacks: fresh handler with state cleanup branches
 "src/ccgram/handlers/recovery_callbacks.py" = ["C901"]
 

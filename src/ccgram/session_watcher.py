@@ -402,7 +402,14 @@ def _read_limited(path: Path) -> bytes:
 def _find_window_for_jsonl(
     jsonl_path: Path, content: bytes
 ) -> tuple[str, str, str | None] | None:
-    """Scan session_map for a window whose hook marker is present in content.
+    """Find which window should own a new jsonl, using layered resolution.
+
+    Resolution order:
+    1. CCGRAM_SESSION_ID env var in pane's process tree — unambiguous.
+    2. cwd-based lookup in session_map: derive slug from jsonl parent dir,
+       find all entries whose cwd slug matches.  If exactly one → use it.
+       If multiple → warn + pick the one with the most-recently-rotated sid.
+    3. Legacy hook-marker scan (requires >=2 occurrences in file content).
 
     Returns (window_id, window_name, current_session_id) if found, else None.
     Runs synchronously — call via asyncio.to_thread.
@@ -416,37 +423,84 @@ def _find_window_for_jsonl(
 
     try:
         session_map: dict = json.loads(map_file.read_text())
-    except json.JSONDecodeError, OSError:
+    except (json.JSONDecodeError, OSError):
         return None
 
-    stem = jsonl_path.stem
+    new_sid = jsonl_path.stem
+    project_slug = jsonl_path.parent.name  # e.g. "-home-peter-projects-james"
 
+    # Build candidate list: all claude entries whose cwd maps to this slug.
+    claude_entries: list[tuple[str, str, str | None]] = []
     for key, entry in session_map.items():
         if not isinstance(entry, dict):
             continue
-        provider = entry.get("provider", "")
+        provider = entry.get("provider_name", "") or entry.get("provider", "")
         if provider and provider != "claude":
             continue
-
-        # key format: "tmux_session:@N"
         parts = key.split(":")
         if len(parts) < 2:
             continue
-        window_id = parts[-1]  # "@N"
+        window_id = parts[-1]
         window_name = entry.get("window_name", "") or ""
+        cwd = entry.get("cwd", "") or ""
+        if cwd:
+            entry_slug = "-" + cwd.lstrip("/").replace("/", "-").replace("_", "-")
+            if entry_slug == project_slug:
+                current_sid = entry.get("session_id") or None
+                claude_entries.append((window_id, window_name, current_sid))
 
+    # ── Step 1: env-marker resolution (unambiguous) ─────────────────────────
+    if claude_entries:
+        for window_id, window_name, current_sid in claude_entries:
+            env_sid = resolve_session_identity(window_id)
+            if env_sid == new_sid:
+                logger.info(
+                    "session watcher [env-marker]: matched %s -> %s (%s)",
+                    new_sid, window_id, window_name,
+                )
+                return window_id, window_name, current_sid
+
+    # ── Step 2: cwd-based resolution ────────────────────────────────────────
+    if len(claude_entries) == 1:
+        window_id, window_name, current_sid = claude_entries[0]
+        logger.info(
+            "session watcher [cwd-single]: matched %s -> %s (%s)",
+            new_sid, window_id, window_name,
+        )
+        return window_id, window_name, current_sid
+
+    if len(claude_entries) > 1:
+        logger.warning(
+            "session watcher [cwd-ambiguous]: %d windows share cwd slug %s for %s "
+            "— picking most-recent; consider using CCGRAM_SESSION_ID",
+            len(claude_entries), project_slug, new_sid,
+        )
+        best = max(claude_entries, key=lambda t: (t[2] or ""))
+        window_id, window_name, current_sid = best
+        return window_id, window_name, current_sid
+
+    # ── Step 3: legacy hook-marker scan ─────────────────────────────────────
+    for key, entry in session_map.items():
+        if not isinstance(entry, dict):
+            continue
+        provider = entry.get("provider_name", "") or entry.get("provider", "")
+        if provider and provider != "claude":
+            continue
+        parts = key.split(":")
+        if len(parts) < 2:
+            continue
+        window_id = parts[-1]
+        window_name = entry.get("window_name", "") or ""
         marker = (
-            f"tmux key=ccgram:{window_id}, window_name={window_name}, session_id={stem}"
+            f"tmux key=ccgram:{window_id}, window_name={window_name}, session_id={new_sid}"
         ).encode()
-        # Require >=2 occurrences (real hooks fire multiple times);
-        # single-occurrence is incidental (tool output / prompt literal).
         if content.count(marker) >= 2:
             current_sid = entry.get("session_id") or None
             logger.warning(
                 "session_fallback_legacy_window",
                 window_id=window_id,
                 cwd=entry.get("cwd", ""),
-                reason="no CCGRAM_SESSION_ID marker — using legacy hook-marker cwd heuristic",
+                reason="no env/cwd match — using legacy hook-marker scan",
             )
             return window_id, window_name, current_sid
 
