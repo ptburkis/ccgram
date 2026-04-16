@@ -96,34 +96,48 @@ def test_process_session_file_sets_window_id(tmp_path: Path) -> None:
 # ── Test 3: router routes correctly on ccgram session_id (no hint needed) ─────
 
 
-def test_find_users_fallback_routing() -> None:
+def test_find_users_fallback_routing(tmp_path: Path) -> None:
     """After the split-ids refactor, routing works on ccgram session_id directly.
 
     Previously this test verified the window_id_hint fallback. Now that
-    register_hookless_session stores the provider UUID in provider_session_id
-    and preserves the ccgram DB session_id in session_id, the router sees the
-    correct ccgram session_id in window_states and no hint is needed.
+    find_users_for_session queries the DB directly, we seed a temp DB and patch
+    Path.home() to point at it.
     """
+    import sqlite3
+    import time
+
+    from ccgram import store
     from ccgram.session_resolver import SessionResolver
+
+    ccgram_dir = tmp_path / ".ccgram"
+    ccgram_dir.mkdir()
+    db_path = ccgram_dir / "state.db"
+    store.init_db(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        store.upsert_session(
+            conn,
+            session_id="ccgram-uuid",
+            cwd="/projects/foo",
+            agent="codex",
+            status="active",
+            window_id="@412",
+            created_at=int(time.time()),
+        )
+        store.upsert_topic_binding_full(
+            conn,
+            100,
+            100,
+            "ccgram-uuid",
+            42,
+            "@412",
+            "myproject",
+            int(time.time()),
+        )
 
     resolver = SessionResolver.__new__(SessionResolver)
 
-    fake_state = MagicMock()
-    # Now session_id holds the ccgram routing id (set by session_lifecycle)
-    fake_state.session_id = "ccgram-uuid"
-
-    fake_window_store = MagicMock()
-    fake_window_store.window_states = {"@412": fake_state}
-
-    fake_thread_router = MagicMock()
-    # user_id=42, thread_id=100, window_id="@412"
-    fake_thread_router.iter_thread_bindings.return_value = [(42, 100, "@412")]
-
-    with (
-        patch("ccgram.session_resolver.window_store", fake_window_store),
-        patch("ccgram.session_resolver.thread_router", fake_thread_router),
-    ):
-        # No window_id_hint needed: session_id is now the ccgram routing id
+    with patch("pathlib.Path.home", return_value=tmp_path):
         result = resolver.find_users_for_session("ccgram-uuid")
 
     assert result == [(42, "@412", 100)]

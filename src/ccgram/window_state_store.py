@@ -12,9 +12,11 @@ Key types: WindowState, APPROVAL_MODES, BATCH_MODES, NOTIFICATION_MODES.
 from __future__ import annotations
 
 import os
+import sqlite3
 import structlog
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Self
 
 logger = structlog.get_logger()
@@ -114,6 +116,12 @@ class WindowState:
         )
 
 
+def _db_path() -> Path:
+    """Return the canonical path of the SQLite state DB."""
+    from .utils import ccgram_dir
+    return ccgram_dir() / "state.db"
+
+
 @dataclass
 class WindowStateStore:
     """Per-window mode and session metadata store.
@@ -128,6 +136,10 @@ class WindowStateStore:
     The ``_on_hookless_provider_switch`` callback (also set by
     SessionManager) is called when switching to a hookless provider so
     session_map.json can be cleaned up without a circular dependency.
+
+    The ``window_states`` dict is a runtime cache. On cache miss,
+    ``get_window_state`` builds the state from DB sources (PTY markers +
+    window_modes table + sessions table) and populates the cache.
     """
 
     window_states: dict[str, WindowState] = field(default_factory=dict)
@@ -145,23 +157,141 @@ class WindowStateStore:
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize window_states for state.json persistence."""
-        return {k: v.to_dict() for k, v in self.window_states.items()}
+        """No-op serialization — window_states are no longer written to state.json."""
+        return {}
 
     def from_dict(self, data: dict[str, Any]) -> None:
-        """Load window_states from state.json data."""
+        """Load window_states from state.json data (called at startup to seed cache)."""
         self.window_states = {
             k: WindowState.from_dict(v) for k, v in data.items() if isinstance(v, dict)
         }
+
+    # ------------------------------------------------------------------
+    # DB write-through helpers
+    # ------------------------------------------------------------------
+
+    def _upsert_window_modes_to_db(self, window_id: str, **kwargs: Any) -> None:
+        """Write window mode fields through to the window_modes DB table.
+
+        Never raises — all errors are caught and logged at debug level.
+        """
+        try:
+            db = _db_path()
+            if not db.exists():
+                return
+            from . import store
+            conn = sqlite3.connect(str(db))
+            conn.row_factory = sqlite3.Row
+            try:
+                store.upsert_window_modes(conn, window_id, **kwargs)
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            logger.debug(
+                "_upsert_window_modes_to_db failed for window_id %s", window_id, exc_info=True
+            )
+
+    # ------------------------------------------------------------------
+    # DB-sourced state construction
+    # ------------------------------------------------------------------
+
+    def _build_window_state_from_sources(self, window_id: str) -> WindowState:
+        """Build a WindowState from DB sources when the cache misses.
+
+        Priority:
+        1. PTY marker (ground truth for live sessions)
+        2. sessions table fallback (for windows without an active marker)
+        3. window_modes table (for mode settings — overlaid on top)
+        """
+        state = WindowState()
+
+        # 1. PTY marker — highest priority for session identity fields.
+        try:
+            from . import pty_markers
+            marker = pty_markers.read_marker_for_window(window_id)
+            if marker:
+                state.session_id = marker.get("session_id", "")
+                state.provider_session_id = marker.get("session_id", "")
+                state.cwd = marker.get("cwd", "")
+                state.transcript_path = marker.get("transcript_path", "")
+                state.window_name = marker.get("window_name", "")
+                prov = marker.get("provider", "")
+                if prov:
+                    state.provider_name = prov
+        except Exception:
+            logger.debug(
+                "_build_window_state_from_sources: PTY marker lookup failed for %s",
+                window_id, exc_info=True,
+            )
+
+        # 2. sessions table fallback when no marker found session_id.
+        if not state.session_id:
+            try:
+                db = _db_path()
+                if db.exists():
+                    conn = sqlite3.connect(str(db))
+                    conn.row_factory = sqlite3.Row
+                    try:
+                        row = conn.execute(
+                            "SELECT session_id, cwd FROM sessions "
+                            "WHERE window_id=? AND status='active' "
+                            "ORDER BY updated_at DESC LIMIT 1",
+                            (window_id,),
+                        ).fetchone()
+                        if row:
+                            state.session_id = row["session_id"]
+                            state.provider_session_id = row["session_id"]
+                            if not state.cwd:
+                                state.cwd = row["cwd"]
+                    finally:
+                        conn.close()
+            except Exception:
+                logger.debug(
+                    "_build_window_state_from_sources: sessions DB lookup failed for %s",
+                    window_id, exc_info=True,
+                )
+
+        # 3. window_modes table — overlaid for mode settings.
+        try:
+            db = _db_path()
+            if db.exists():
+                conn = sqlite3.connect(str(db))
+                conn.row_factory = sqlite3.Row
+                try:
+                    row = conn.execute(
+                        "SELECT approval_mode, batch_mode, notification_mode, "
+                        "provider_name, external FROM window_modes WHERE window_id=?",
+                        (window_id,),
+                    ).fetchone()
+                    if row:
+                        state.approval_mode = row["approval_mode"] or DEFAULT_APPROVAL_MODE
+                        state.batch_mode = row["batch_mode"] or DEFAULT_BATCH_MODE
+                        notif = row["notification_mode"] or "summary"
+                        if notif in _LEGACY_NOTIFICATION_MODES:
+                            notif = "summary"
+                        state.notification_mode = notif
+                        if row["provider_name"] and not state.provider_name:
+                            state.provider_name = row["provider_name"]
+                        state.external = bool(row["external"])
+                finally:
+                    conn.close()
+        except Exception:
+            logger.debug(
+                "_build_window_state_from_sources: window_modes DB lookup failed for %s",
+                window_id, exc_info=True,
+            )
+
+        return state
 
     # ------------------------------------------------------------------
     # Core get/create
     # ------------------------------------------------------------------
 
     def get_window_state(self, window_id: str) -> WindowState:
-        """Get or create window state."""
+        """Get or create window state, building from DB sources on cache miss."""
         if window_id not in self.window_states:
-            self.window_states[window_id] = WindowState()
+            self.window_states[window_id] = self._build_window_state_from_sources(window_id)
         return self.window_states[window_id]
 
     def clear_window_session(self, window_id: str) -> None:
@@ -217,6 +347,7 @@ class WindowStateStore:
                     state.transcript_path = ""
                 self._on_hookless_provider_switch(window_id)
 
+        self._upsert_window_modes_to_db(window_id, provider_name=provider_name)
         self._schedule_save()
 
     # ------------------------------------------------------------------
@@ -237,6 +368,7 @@ class WindowStateStore:
         state = self.get_window_state(window_id)
         if state.notification_mode != mode:
             state.notification_mode = mode
+            self._upsert_window_modes_to_db(window_id, notification_mode=mode)
             self._schedule_save()
 
     def cycle_notification_mode(self, window_id: str) -> str:
@@ -265,6 +397,7 @@ class WindowStateStore:
             raise ValueError(f"Invalid approval mode: {mode!r}")
         state = self.get_window_state(window_id)
         state.approval_mode = normalized
+        self._upsert_window_modes_to_db(window_id, approval_mode=normalized)
         self._schedule_save()
 
     # ------------------------------------------------------------------
@@ -284,6 +417,7 @@ class WindowStateStore:
         state = self.get_window_state(window_id)
         if state.batch_mode != mode:
             state.batch_mode = mode
+            self._upsert_window_modes_to_db(window_id, batch_mode=mode)
             self._schedule_save()
 
     def cycle_batch_mode(self, window_id: str) -> str:
@@ -321,6 +455,21 @@ class WindowStateStore:
         for wid in stale:
             logger.info("Pruning stale window_state: %s", wid)
             del self.window_states[wid]
+            try:
+                db = _db_path()
+                if db.exists():
+                    from . import store
+                    conn = sqlite3.connect(str(db))
+                    conn.row_factory = sqlite3.Row
+                    try:
+                        store.delete_window_modes(conn, wid)
+                        conn.commit()
+                    finally:
+                        conn.close()
+            except Exception:
+                logger.debug(
+                    "prune_stale_window_states: DB delete failed for %s", wid, exc_info=True
+                )
         self._schedule_save()
         return True
 

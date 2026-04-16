@@ -201,27 +201,32 @@ class SessionResolver:
         self,
         session_id: str,
         *,
-        window_id_hint: str = "",  # Deprecated no-op: see note below.
+        window_id_hint: str = "",
     ) -> list[tuple[int, str, int]]:
         """Find users whose thread-bound window maps to session_id.
 
-        ``session_id`` must be the ccgram DB session_id (routing identity),
-        which is stored in ``window_states[w].session_id`` and matches
-        ``sessions.session_id`` / ``topic_bindings.session_id`` in SQLite.
-
-        ``window_id_hint`` is kept for call-site compatibility but is now a
-        no-op. NewMessage.session_id is always the ccgram routing id so the
-        direct lookup below is sufficient without any fallback.
-
-        # window_id_hint fallback removed: NewMessage.session_id is now always the
-        # ccgram DB session_id (not the provider UUID), so direct session_id lookup
-        # is sufficient. See: refactor/split-session-ids commit.
+        DB-direct: queries topic_bindings table directly instead of iterating
+        the in-memory window_states dict (which may be empty at startup).
         """
+        import sqlite3
+        from pathlib import Path
         result: list[tuple[int, str, int]] = []
-        for user_id, thread_id, window_id in thread_router.iter_thread_bindings():
-            state = window_store.window_states.get(window_id)
-            if state and state.session_id == session_id:
-                result.append((user_id, window_id, thread_id))
+        try:
+            db_path = Path.home() / ".ccgram" / "state.db"
+            if not db_path.exists():
+                return result
+            conn = sqlite3.connect(str(db_path))
+            try:
+                rows = conn.execute(
+                    "SELECT user_id, window_id, topic_id FROM topic_bindings "
+                    "WHERE session_id=? AND user_id IS NOT NULL AND window_id IS NOT NULL",
+                    (session_id,),
+                ).fetchall()
+                result = [(r[0], r[1], r[2]) for r in rows]
+            finally:
+                conn.close()
+        except Exception:
+            logger.debug("find_users_for_session DB query failed", exc_info=True)
         return result
 
     async def get_recent_messages(
