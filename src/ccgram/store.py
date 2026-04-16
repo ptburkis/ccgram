@@ -432,6 +432,17 @@ def delete_topic_binding(conn: sqlite3.Connection, group_id: int, topic_id: int)
     return cur.rowcount
 
 
+def update_topic_binding_title(
+    conn: sqlite3.Connection, group_id: int, topic_id: int, topic_title: str
+) -> int:
+    """Update ``topic_title`` for an existing binding.  Returns row count (0 or 1)."""
+    cur = conn.execute(
+        "UPDATE topic_bindings SET topic_title = ? WHERE group_id = ? AND topic_id = ?",
+        (topic_title, group_id, topic_id),
+    )
+    return cur.rowcount
+
+
 def _row_to_binding(row: sqlite3.Row) -> TopicBinding:
     return TopicBinding(
         group_id=row["group_id"],

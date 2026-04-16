@@ -94,7 +94,7 @@ from .handlers.message_queue import (
 )
 from .handlers.message_sender import safe_reply
 from .handlers.response_builder import build_response_parts
-from .handlers.polling_coordinator import status_poll_loop
+from .handlers.polling_coordinator import status_poll_loop, _strip_effort_suffix
 from .handlers.file_handler import handle_document_message, handle_photo_message
 from .handlers.forum_topic_created import (
     forum_topic_created_handler as _forum_topic_created_handler,
@@ -298,14 +298,18 @@ async def topic_edited_handler(
         )
         return
 
-    renamed = await tmux_manager.rename_window(window_id, clean_name)
+    # Strip effort/bg suffixes before renaming tmux; keep full name in DB.
+    window_name = _strip_effort_suffix(clean_name)
+    renamed = await tmux_manager.rename_window(window_id, window_name)
     if renamed:
-        session_manager.set_display_name(window_id, clean_name)
-        update_stored_topic_name(chat_id, thread_id, clean_name)
+        session_manager.set_display_name(window_id, window_name)
+        update_stored_topic_name(chat_id, thread_id, window_name)
+        with store.connect() as conn:
+            store.update_topic_binding_title(conn, chat_id, thread_id, clean_name)
         logger.info(
             "Topic renamed: window %s → %r (thread=%d)",
             window_id,
-            clean_name,
+            window_name,
             thread_id,
         )
 

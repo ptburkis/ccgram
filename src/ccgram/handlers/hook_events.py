@@ -8,8 +8,11 @@ of relying solely on terminal scraping.
 Key function: dispatch_hook_event().
 """
 
+import json
+import os
 import time
 from collections.abc import Sequence
+from pathlib import Path
 
 import structlog
 
@@ -27,6 +30,13 @@ logger = structlog.get_logger()
 _ROTATION_NOTICE_DEBOUNCE_SECS = 30.0
 # window_id -> last-notice timestamp
 _rotation_notice_last: dict[str, float] = {}
+
+# Set CCGRAM_ROTATION_NOTICES=1 to re-enable Telegram rotation notices for debugging.
+_ROTATION_NOTICES_ENABLED = os.environ.get("CCGRAM_ROTATION_NOTICES", "0").strip() == "1"
+
+# File-based IPC: dashboard writes intentional-stop markers here before pkill.
+# Format: { "<window_id>": <epoch_float> }  — value is the "suppress until" time.
+_INTENTIONAL_STOP_FILE = Path.home() / ".ccgram" / "intentional-stops.json"
 
 _WINDOW_KEY_PARTS = 2
 
@@ -144,7 +154,7 @@ async def _enhance_with_llm_summary(
                 await enqueue_status_update(
                     bot, user_id, window_id, enhanced, thread_id=thread_id
                 )
-    except RuntimeError, OSError, ValueError:
+    except (RuntimeError, OSError, ValueError):
         logger.debug("LLM summary enhancement failed", exc_info=True)
 
 
@@ -400,25 +410,44 @@ async def _handle_teammate_idle(event: HookEvent, bot: Bot) -> None:
         await enqueue_status_update(bot, user_id, window_id, text, thread_id=thread_id)
 
 
+def _is_intentional_stop(window_id: str) -> bool:
+    """Return True if this window had an intentional stop marked recently."""
+    try:
+        data = json.loads(_INTENTIONAL_STOP_FILE.read_text())
+        until = data.get(window_id, 0.0)
+        return time.time() < until
+    except (OSError, ValueError, KeyError):
+        return False
+
+
 async def _handle_stop_failure(event: HookEvent, bot: Bot) -> None:
-    """Handle a StopFailure event — alert on API error termination."""
+    """Handle a StopFailure event — alert on unexpected agent termination."""
     from .message_sender import rate_limit_send_message
 
     users = _resolve_users_for_window_key(event.window_key)
     if not users:
         return
 
-    error = event.data.get("error", "unknown")
+    window_id = users[0][2]
+
+    if _is_intentional_stop(window_id):
+        logger.info("Hook StopFailure suppressed (intentional stop): window=%s", window_id)
+        return
+
+    error = event.data.get("error", "")
     error_details = event.data.get("error_details", "")
     logger.warning(
         "Hook StopFailure: window_key=%s, error=%s, details=%s",
         event.window_key,
-        error,
+        error or "(empty)",
         error_details,
     )
 
-    detail = f": {error_details}" if error_details else ""
-    text = f"\u26a0 API error — {error}{detail}"
+    if error:
+        detail = f": {error_details}" if error_details else ""
+        text = f"\u26a0 API error \u2014 {error}{detail}"
+    else:
+        text = "\u26a0 Agent terminated unexpectedly (no detail from Claude Code)"
 
     for user_id, thread_id, _window_id in users:
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
@@ -530,6 +559,16 @@ async def _handle_session_start(event: HookEvent, bot: Bot) -> None:  # noqa: C9
         )
         return
 
+    # Skip subagent SessionStart events — only handle primary-session rotations.
+    if not _is_primary_session_start(event):
+        logger.debug(
+            "SessionStart: skipping subagent event for window %s (transcript=%s, parent=%s)",
+            window_id,
+            event.data.get("transcript_path", ""),
+            event.data.get("parent_session_id", ""),
+        )
+        return
+
     new_sid = event.session_id
     cwd = event.data.get("cwd", "")
     new_transcript = event.data.get("transcript_path", "")
@@ -594,30 +633,33 @@ async def _handle_session_start(event: HookEvent, bot: Bot) -> None:  # noqa: C9
             "SessionStart: DB update failed for %s", window_id, exc_info=True
         )
 
-    # Debounced rotation notice to the bound Telegram topic (one per 30s per window).
+    # Log rotation at INFO level. Only post to Telegram if explicitly enabled
+    # (CCGRAM_ROTATION_NOTICES=1) — by default these are silent to avoid
+    # flooding topics during subagent-heavy sessions.
     now = time.monotonic()
     last = _rotation_notice_last.get(window_id, 0.0)
     if now - last >= _ROTATION_NOTICE_DEBOUNCE_SECS:
         _rotation_notice_last[window_id] = now
-        users = _resolve_users_for_window_key(event.window_key)
-        for user_id, thread_id, _wid in users:
-            chat_id = thread_router.resolve_chat_id(user_id, thread_id)
-            if chat_id:
-                short_old = (old_sid[:8] + "\u2026") if old_sid else "(new)"
-                short_new = new_sid[:8] + "\u2026"
-                notice = (
-                    f"\U0001f504 Session rotated: {short_old} \u2192 {short_new}"
-                )
-                try:
-                    await rate_limit_send_message(
-                        bot, chat_id, notice, message_thread_id=thread_id
+        if _ROTATION_NOTICES_ENABLED:
+            users = _resolve_users_for_window_key(event.window_key)
+            for user_id, thread_id, _wid in users:
+                chat_id = thread_router.resolve_chat_id(user_id, thread_id)
+                if chat_id:
+                    short_old = (old_sid[:8] + "\u2026") if old_sid else "(new)"
+                    short_new = new_sid[:8] + "\u2026"
+                    notice = (
+                        f"\U0001f504 Session rotated: {short_old} \u2192 {short_new}"
                     )
-                except (OSError, RuntimeError):
-                    logger.debug(
-                        "SessionStart: rotation notice failed for %s",
-                        window_id,
-                        exc_info=True,
-                    )
+                    try:
+                        await rate_limit_send_message(
+                            bot, chat_id, notice, message_thread_id=thread_id
+                        )
+                    except (OSError, RuntimeError):
+                        logger.debug(
+                            "SessionStart: rotation notice failed for %s",
+                            window_id,
+                            exc_info=True,
+                        )
 
 
 # Hook events that indicate the agent is actively working on something,
@@ -639,6 +681,28 @@ _BUSY_HOOK_EVENTS: frozenset[str] = frozenset(
         "PermissionRequest",
     }
 )
+
+
+def _is_primary_session_start(event: HookEvent) -> bool:
+    """Return True only if this SessionStart is for a primary (non-subagent) session.
+
+    Claude Code fires SessionStart on subagent spawns too. We filter them out by:
+    1. Checking for a ``parent_session_id`` field in the payload — subagents carry one.
+    2. Checking whether the transcript_path lives under an ``agents/`` subdirectory —
+       e.g. ``~/.claude/projects/<slug>/agents/<parent_sid>/<child_sid>.jsonl``.
+    """
+    # Explicit parent_session_id in payload → subagent
+    if event.data.get("parent_session_id"):
+        return False
+
+    transcript_path = event.data.get("transcript_path", "")
+    if transcript_path:
+        p = Path(transcript_path)
+        # Check any ancestor directory named "agents"
+        if "agents" in p.parts:
+            return False
+
+    return True
 
 
 def _window_id_from_key(window_key: str) -> str:
@@ -663,7 +727,7 @@ async def dispatch_hook_event(event: HookEvent, bot: Bot) -> None:
                 wid = _window_id_from_key(event.window_key)
                 if wid:
                     mon.record_hook_activity(wid)
-        except ImportError, AttributeError:
+        except (ImportError, AttributeError):
             pass
 
     match event.event_type:
