@@ -315,3 +315,112 @@ class TestMigrateToV3:
         assert len(modes) == 1
         assert len(gchat) == 1
         assert len(names) == 1
+
+    def test_marker_data_preferred_over_thread_bindings(self, tmp_path):
+        """Bug 1: PTY marker window_id/session_id wins over stale thread_bindings.
+
+        Seed:
+          - state.json thread_bindings maps topic_id=99 to stale '@160'
+          - A PTY marker file for 'paint-my-room' with window_id='@7', session_id='live-sess'
+          - A topic_binding row with topic_id=99, topic_title='paint-my-room'
+
+        After migration the binding must have window_id='@7' and session_id='live-sess',
+        not the stale '@160' from thread_bindings.
+        """
+        db = tmp_path / "state.db"
+        now = int(time.time())
+        store.init_db(db)
+
+        with store.connect(db) as c:
+            store.upsert_session(c, session_id="old-sess", cwd="/c", agent="claude",
+                                 status="active", window_id="@160", created_at=now)
+            store.upsert_topic_binding(c, group_id=-100, topic_id=99,
+                                       session_id="old-sess", topic_title="paint-my-room",
+                                       bound_at=now)
+
+        # Write a PTY marker file that reflects the live window (overrides stale data)
+        markers_dir = tmp_path / "active-sessions"
+        markers_dir.mkdir()
+        marker_data = {
+            "pty": "/dev/pts/5",
+            "window_id": "@7",
+            "window_name": "paint-my-room",
+            "pid": 12345,
+            "provider": "claude",
+            "session_id": "live-sess",
+            "transcript_path": "/tmp/t.jsonl",
+            "cwd": "/home/peter",
+            "last_seen_at": now,
+        }
+        (markers_dir / "pts5.json").write_text(json.dumps(marker_data))
+
+        state_json = _make_state_json(
+            tmp_path,
+            # Stale thread_bindings say @160 — must be overridden by marker
+            thread_bindings={"1234": {"99": "@160"}},
+        )
+        summary = store.migrate_to_v3(db, state_json, markers_dir=markers_dir)
+
+        with store.connect(db) as c:
+            b = store.get_topic_binding(c, -100, 99)
+        assert b is not None, "topic_binding row not found"
+        assert b.window_id == "@7", (
+            f"Expected @7 (from marker), got {b.window_id!r} (stale @160 from thread_bindings)"
+        )
+        assert b.session_id == "live-sess", (
+            f"Expected live-sess (from marker), got {b.session_id!r}"
+        )
+        assert summary["window_ids_set"] >= 1
+
+    def test_live_bot_backfill_uses_explicit_allowed_users(self, tmp_path):
+        """Bug 2: passing allowed_users explicitly (live-bot path) backfills NULL rows.
+
+        Simulates the live bot path where config.allowed_users is a set — previously
+        the env-var-only path would hit the 'ambiguous' branch when multiple entries
+        were set and skip the backfill.  With allowed_users={single_id} passed
+        explicitly the backfill must run regardless of the env var.
+        """
+        db = tmp_path / "state.db"
+        now = int(time.time())
+        store.init_db(db)
+
+        # Seed 5 topic_bindings with user_id=NULL (simulating topics not in thread_bindings)
+        raw_conn = sqlite3.connect(str(db))
+        try:
+            for i in range(5):
+                sid = f"bot-sess-{i}"
+                raw_conn.execute(
+                    "INSERT INTO sessions (session_id, cwd, agent, status, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (sid, "/tmp", "claude", "active", now, now),
+                )
+                raw_conn.execute(
+                    "INSERT INTO topic_bindings (group_id, topic_id, session_id, topic_title, bound_at)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (-100, 200 + i, sid, f"Bot Topic {i}", now),
+                )
+            raw_conn.commit()
+        finally:
+            raw_conn.close()
+
+        state_json = _make_state_json(tmp_path)  # empty thread_bindings
+
+        # Live bot path: pass allowed_users explicitly as a single-element set.
+        # Pre-fix: env-var path with ALLOWED_USERS=111,222 would hit 'ambiguous' and skip.
+        summary = store.migrate_to_v3(db, state_json, allowed_users={777777})
+
+        assert summary["user_ids_set"] == 5, (
+            f"Expected backfill to set 5 user_ids, got {summary['user_ids_set']}"
+        )
+        raw_conn2 = sqlite3.connect(str(db))
+        try:
+            rows = raw_conn2.execute(
+                "SELECT user_id FROM topic_bindings WHERE group_id=-100"
+            ).fetchall()
+            assert all(r[0] == 777777 for r in rows), "Some user_ids not backfilled"
+            null_count = raw_conn2.execute(
+                "SELECT COUNT(*) FROM topic_bindings WHERE user_id IS NULL"
+            ).fetchone()[0]
+            assert null_count == 0, f"{null_count} rows still have user_id=NULL"
+        finally:
+            raw_conn2.close()

@@ -346,7 +346,13 @@ class SessionManager:
             return
 
         try:
-            summary = _store.migrate_to_v3(_store.db_path(), state_path)
+            from .pty_markers import _markers_dir as _get_markers_dir
+            summary = _store.migrate_to_v3(
+                _store.db_path(),
+                state_path,
+                markers_dir=_get_markers_dir(),
+                allowed_users=config.allowed_users,
+            )
         except Exception:
             logger.exception("Failed to migrate state.json to DB")
             return

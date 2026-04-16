@@ -307,22 +307,70 @@ def _apply_v3_schema_additions(conn: sqlite3.Connection) -> None:
     logger.info("schema migration v3: schema additions applied")
 
 
-def _backfill_null_user_ids(conn: sqlite3.Connection, summary: dict[str, Any]) -> None:
-    """Step 5 of migrate_to_v3: backfill user_id=NULL rows from ALLOWED_USERS env."""
+def _resolve_binding_from_markers(
+    markers_by_name: "dict[str, dict]",
+    topic_title: str,
+) -> "tuple[str, str] | None":
+    """Look up (session_id, window_id) for *topic_title* in PTY marker data.
+
+    *markers_by_name* is a dict keyed by ``window_name`` (as written in each
+    marker file).  *topic_title* is stripped of a leading ``[M]`` prefix and
+    any ``\u26a1`` (⚡) emoji before matching.
+
+    Returns ``(session_id, window_id)`` if a live marker matches, else ``None``.
+    """
+    # Normalise the topic title: strip [M] prefix, ⚡ emoji, and whitespace.
+    normalised = topic_title
+    for prefix in ("[M] ", "[M]"):
+        if normalised.startswith(prefix):
+            normalised = normalised[len(prefix):]
+    normalised = normalised.replace("\u26a1", "").strip()
+
+    marker = markers_by_name.get(normalised)
+    if marker is None:
+        return None
+    sid = marker.get("session_id", "")
+    wid = marker.get("window_id", "")
+    if sid and wid:
+        return sid, wid
+    return None
+
+
+def _backfill_null_user_ids(
+    conn: sqlite3.Connection,
+    summary: dict[str, Any],
+    allowed_users: "set[int] | None" = None,
+) -> None:
+    """Step 5 of migrate_to_v3: backfill user_id=NULL rows from ALLOWED_USERS.
+
+    *allowed_users* — explicit set of allowed Telegram user IDs passed by the
+    caller (e.g. from ``config.allowed_users``).  When *None* the function
+    falls back to reading the ``ALLOWED_USERS`` environment variable directly,
+    which preserves backwards-compatibility for the test and CLI paths.
+
+    Emits a WARNING log whenever the backfill is skipped so the operator can
+    see it clearly in bot logs.
+    """
     null_rows = conn.execute(
         "SELECT topic_id FROM topic_bindings WHERE user_id IS NULL"
     ).fetchall()
     if not null_rows:
         return
-    allowed_users_raw = os.getenv("ALLOWED_USERS", "")
-    allowed_ids: list[int] = []
-    for part in allowed_users_raw.split(","):
-        part = part.strip()
-        if part:
-            try:
-                allowed_ids.append(int(part))
-            except ValueError:
-                pass
+
+    if allowed_users is not None:
+        allowed_ids: list[int] = sorted(allowed_users)
+    else:
+        # Fallback: parse ALLOWED_USERS env var (test / CLI path)
+        allowed_users_raw = os.getenv("ALLOWED_USERS", "")
+        allowed_ids = []
+        for part in allowed_users_raw.split(","):
+            part = part.strip()
+            if part:
+                try:
+                    allowed_ids.append(int(part))
+                except ValueError:
+                    pass
+
     null_topic_ids = [r["topic_id"] for r in null_rows]
     if len(allowed_ids) == 1:
         uid = allowed_ids[0]
@@ -337,24 +385,43 @@ def _backfill_null_user_ids(conn: sqlite3.Connection, summary: dict[str, Any]) -
         summary["user_ids_set"] += count
     elif len(allowed_ids) == 0:
         logger.warning(
-            "migrate_to_v3: %d topic_binding row(s) still have user_id=NULL "
-            "and ALLOWED_USERS is empty — topic_ids: %s",
+            "migrate_to_v3: BACKFILL SKIPPED — %d topic_binding row(s) still have "
+            "user_id=NULL and ALLOWED_USERS is empty — topic_ids: %s",
             len(null_topic_ids), null_topic_ids,
         )
     else:
         logger.warning(
-            "migrate_to_v3: %d topic_binding row(s) still have user_id=NULL "
-            "and ALLOWED_USERS is ambiguous (%d users) — topic_ids: %s",
+            "migrate_to_v3: BACKFILL SKIPPED — %d topic_binding row(s) still have "
+            "user_id=NULL and ALLOWED_USERS is ambiguous (%d users) — topic_ids: %s. "
+            "Pass allowed_users explicitly if there is a single primary admin.",
             len(null_topic_ids), len(allowed_ids), null_topic_ids,
         )
 
 
-def migrate_to_v3(db: "str | Path", state_json: "str | Path") -> dict[str, Any]:
+def migrate_to_v3(
+    db: "str | Path",
+    state_json: "str | Path",
+    *,
+    markers_dir: "str | Path | None" = None,
+    allowed_users: "set[int] | None" = None,
+) -> dict[str, Any]:
     """Migrate state.json routing data into the v3 DB schema.
 
     Reads thread_bindings, window_states, group_chat_ids, window_display_names
     from state.json and upserts them into the DB.  Returns a summary dict with
     counts of rows affected.  Safe to call on a backup DB.
+
+    *markers_dir* — path to the PTY marker directory (``~/.ccgram/active-sessions/``
+    by default when ``None``).  Each ``*.json`` file there is authoritative for
+    the live ``window_id`` and ``session_id`` of a named window.  Marker data
+    takes priority over thread_bindings and sessions table data when resolving
+    window_id for topic_bindings.
+
+    *allowed_users* — explicit set of allowed Telegram user IDs (from
+    ``config.allowed_users``).  Passed through to the user_id backfill step so
+    the live bot path does not rely solely on the ``ALLOWED_USERS`` env var.
+    When ``None`` the backfill falls back to reading the env var directly
+    (preserves test / CLI compatibility).
 
     This is a standalone function (not called automatically on init_db) so that
     the caller (session.py on first v3 boot, or the dry-run verification path)
@@ -384,6 +451,28 @@ def migrate_to_v3(db: "str | Path", state_json: "str | Path") -> dict[str, Any]:
     # Ensure DB is at v3 schema
     init_db(db_path_resolved)
 
+    # Load PTY marker files — keyed by window_name for fast lookup.
+    # These are the authoritative source for live window_id / session_id.
+    from pathlib import Path as _Path
+    from ccgram.utils import ccgram_dir as _ccgram_dir
+    _markers_root: _Path = _Path(markers_dir) if markers_dir is not None else (
+        _ccgram_dir() / "active-sessions"
+    )
+    markers_by_name: dict[str, dict] = {}
+    if _markers_root.is_dir():
+        for _mf in _markers_root.glob("*.json"):
+            try:
+                _md = json.loads(_mf.read_text())
+                _wname = _md.get("window_name", "")
+                if _wname:
+                    markers_by_name[_wname] = _md
+            except Exception:
+                pass
+    logger.info(
+        "migrate_to_v3: loaded %d live PTY marker(s) from %s",
+        len(markers_by_name), _markers_root,
+    )
+
     conn = sqlite3.connect(str(db_path_resolved))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
@@ -391,7 +480,7 @@ def migrate_to_v3(db: "str | Path", state_json: "str | Path") -> dict[str, Any]:
         now = int(time.time())
 
         # 0. Populate window_id from sessions table where possible (fallback for
-        #    rows not covered by thread_bindings)
+        #    rows not covered by thread_bindings or markers)
         conn.execute("""
             UPDATE topic_bindings
             SET window_id = (
@@ -402,7 +491,9 @@ def migrate_to_v3(db: "str | Path", state_json: "str | Path") -> dict[str, Any]:
             WHERE window_id IS NULL
         """)
 
-        # 1. Migrate thread_bindings → topic_bindings.user_id + window_id
+        # 1. Migrate thread_bindings → topic_bindings.user_id + window_id.
+        #    For each topic_binding, prefer PTY marker data (authoritative live
+        #    window_id/session_id) over the stale thread_bindings value.
         thread_bindings: dict[str, dict[str, str]] = raw.get("thread_bindings", {})
         for uid_str, bindings in thread_bindings.items():
             try:
@@ -416,20 +507,107 @@ def migrate_to_v3(db: "str | Path", state_json: "str | Path") -> dict[str, Any]:
                     continue
                 # Find a matching topic_binding row by topic_id (no group_id in thread_bindings)
                 rows = conn.execute(
-                    "SELECT group_id, topic_id FROM topic_bindings WHERE topic_id = ?",
+                    "SELECT group_id, topic_id, topic_title, session_id FROM topic_bindings"
+                    " WHERE topic_id = ?",
                     (topic_id,),
                 ).fetchall()
                 for row in rows:
-                    conn.execute(
-                        """UPDATE topic_bindings
-                           SET user_id = ?, window_id = ?
-                           WHERE group_id = ? AND topic_id = ?
-                             AND (user_id IS NULL OR window_id IS NULL)""",
-                        (user_id, window_id, row["group_id"], row["topic_id"]),
+                    # Prefer PTY marker: it has the live window_id + session_id.
+                    marker_hit = _resolve_binding_from_markers(
+                        markers_by_name, row["topic_title"]
                     )
+                    if marker_hit is not None:
+                        resolved_session_id, resolved_window_id = marker_hit
+                        logger.info(
+                            "migrate_to_v3: topic_id=%d '%s' — using PTY marker "
+                            "window_id=%s session_id=%s (state.json had %s)",
+                            topic_id, row["topic_title"],
+                            resolved_window_id, resolved_session_id, window_id,
+                        )
+                        # Ensure the session from the marker exists in sessions table
+                        # (it may be a new session not yet recorded during migration).
+                        # Normalise title to look up the full marker dict.
+                        _s1_norm = row["topic_title"]
+                        for _s1p in ("[M] ", "[M]"):
+                            if _s1_norm.startswith(_s1p):
+                                _s1_norm = _s1_norm[len(_s1p):]
+                        _s1_norm = _s1_norm.replace("⚡", "").strip()
+                        _s1_marker = markers_by_name.get(_s1_norm, {})
+                        conn.execute(
+                            """INSERT OR IGNORE INTO sessions
+                               (session_id, cwd, agent, status, window_id, created_at, updated_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (resolved_session_id,
+                             _s1_marker.get("cwd", "/"),
+                             _s1_marker.get("provider", "claude"),
+                             "active",
+                             resolved_window_id,
+                             now, now),
+                        )
+                        conn.execute(
+                            """UPDATE topic_bindings
+                               SET user_id = ?, window_id = ?, session_id = ?
+                               WHERE group_id = ? AND topic_id = ?""",
+                            (user_id, resolved_window_id, resolved_session_id,
+                             row["group_id"], row["topic_id"]),
+                        )
+                    else:
+                        conn.execute(
+                            """UPDATE topic_bindings
+                               SET user_id = ?, window_id = ?
+                               WHERE group_id = ? AND topic_id = ?
+                                 AND (user_id IS NULL OR window_id IS NULL)""",
+                            (user_id, window_id, row["group_id"], row["topic_id"]),
+                        )
                     if conn.execute("SELECT changes()").fetchone()[0]:
                         summary["user_ids_set"] += 1
                         summary["window_ids_set"] += 1
+
+        # 1b. For topic_bindings NOT in thread_bindings, still try to resolve
+        #     window_id (and session_id) from PTY markers using topic_title.
+        unresolved_rows = conn.execute(
+            "SELECT group_id, topic_id, topic_title, session_id"
+            " FROM topic_bindings WHERE window_id IS NULL"
+        ).fetchall()
+        for row in unresolved_rows:
+            marker_hit = _resolve_binding_from_markers(
+                markers_by_name, row["topic_title"]
+            )
+            if marker_hit is not None:
+                resolved_session_id, resolved_window_id = marker_hit
+                logger.info(
+                    "migrate_to_v3: topic_id=%d '%s' — PTY marker resolved "
+                    "window_id=%s session_id=%s (not in thread_bindings)",
+                    row["topic_id"], row["topic_title"],
+                    resolved_window_id, resolved_session_id,
+                )
+                # Normalise topic_title to look up the full marker dict for cwd/provider
+                _norm_title = row["topic_title"]
+                for _pfx in ("[M] ", "[M]"):
+                    if _norm_title.startswith(_pfx):
+                        _norm_title = _norm_title[len(_pfx):]
+                _norm_title = _norm_title.replace("⚡", "").strip()
+                _full_marker = markers_by_name.get(_norm_title, {})
+                conn.execute(
+                    """INSERT OR IGNORE INTO sessions
+                       (session_id, cwd, agent, status, window_id, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (resolved_session_id,
+                     _full_marker.get("cwd", "/"),
+                     _full_marker.get("provider", "claude"),
+                     "active",
+                     resolved_window_id,
+                     now, now),
+                )
+                conn.execute(
+                    """UPDATE topic_bindings
+                       SET window_id = ?, session_id = ?
+                       WHERE group_id = ? AND topic_id = ?""",
+                    (resolved_window_id, resolved_session_id,
+                     row["group_id"], row["topic_id"]),
+                )
+                if conn.execute("SELECT changes()").fetchone()[0]:
+                    summary["window_ids_set"] += 1
 
         # 2. Migrate window_states → window_modes
         window_states: dict[str, dict[str, Any]] = raw.get("window_states", {})
@@ -481,7 +659,7 @@ def migrate_to_v3(db: "str | Path", state_json: "str | Path") -> dict[str, Any]:
                 summary["display_name_prefs_inserted"] += 1
 
         # 5. Backfill user_id=NULL rows from ALLOWED_USERS env var
-        _backfill_null_user_ids(conn, summary)
+        _backfill_null_user_ids(conn, summary, allowed_users=allowed_users)
 
         conn.commit()
     except Exception:
