@@ -80,9 +80,7 @@ async def fire_cron(
         else:
             await _default_send_keys(tmux_target, cron.message)
     except Exception as exc:  # noqa: BLE001
-        _std_logger.error(
-            "cron %d (%r): send_keys failed: %s", cron.id, cron.name, exc
-        )
+        _std_logger.error("cron %d (%r): send_keys failed: %s", cron.id, cron.name, exc)
         return {
             "fired": False,
             "source": source,

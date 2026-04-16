@@ -165,7 +165,9 @@ class Cron:
     id: int
     name: str
     schedule: str
-    target_window: str  # DEPRECATED — use target_session_id or (target_group_id, target_topic_id)
+    target_window: (
+        str  # DEPRECATED — use target_session_id or (target_group_id, target_topic_id)
+    )
     message: str
     enabled: bool
     last_run: int | None
@@ -320,9 +322,7 @@ def get_session_by_window(conn: sqlite3.Connection, window_id: str) -> Session |
     return _row_to_session(row) if row else None
 
 
-def list_sessions(
-    conn: sqlite3.Connection, status: str | None = None
-) -> list[Session]:
+def list_sessions(conn: sqlite3.Connection, status: str | None = None) -> list[Session]:
     """Return all sessions, optionally filtered by ``status``."""
     if status is not None:
         rows = conn.execute(
@@ -423,9 +423,7 @@ def list_topic_bindings(
     return [_row_to_binding(r) for r in rows]
 
 
-def delete_topic_binding(
-    conn: sqlite3.Connection, group_id: int, topic_id: int
-) -> int:
+def delete_topic_binding(conn: sqlite3.Connection, group_id: int, topic_id: int) -> int:
     """Delete a topic binding.  Returns row count (0 or 1)."""
     cur = conn.execute(
         "DELETE FROM topic_bindings WHERE group_id = ? AND topic_id = ?",
@@ -588,15 +586,24 @@ def upsert_cron(
             target_topic_id   = excluded.target_topic_id,
             target_group_id   = excluded.target_group_id
         """,
-        (id, name, schedule, target_window, message, int(enabled),
-         last_run, last_result, c_at,
-         target_session_id, target_topic_id, target_group_id),
+        (
+            id,
+            name,
+            schedule,
+            target_window,
+            message,
+            int(enabled),
+            last_run,
+            last_result,
+            c_at,
+            target_session_id,
+            target_topic_id,
+            target_group_id,
+        ),
     )
 
 
-def list_crons(
-    conn: sqlite3.Connection, enabled: bool | None = None
-) -> list[Cron]:
+def list_crons(conn: sqlite3.Connection, enabled: bool | None = None) -> list[Cron]:
     """Return all cron rows, optionally filtered by ``enabled``."""
     if enabled is not None:
         rows = conn.execute(
@@ -619,7 +626,9 @@ def delete_cron(conn: sqlite3.Connection, id: int) -> int:
     return cur.rowcount
 
 
-def resolve_cron_target(cron: "Cron", conn: sqlite3.Connection) -> dict[str, Any] | None:
+def resolve_cron_target(
+    cron: "Cron", conn: sqlite3.Connection
+) -> dict[str, Any] | None:
     """Resolve the dispatch target for *cron* using the priority ladder.
 
     Priority: target_session_id > (target_group_id, target_topic_id) > target_window (legacy).
@@ -629,25 +638,38 @@ def resolve_cron_target(cron: "Cron", conn: sqlite3.Connection) -> dict[str, Any
     if cron.target_session_id:
         session = get_session(conn, cron.target_session_id)
         if session is not None:
-            return {"window_id": session.window_id, "session_id": session.session_id,
-                    "topic_id": None, "source": "session_id"}
+            return {
+                "window_id": session.window_id,
+                "session_id": session.session_id,
+                "topic_id": None,
+                "source": "session_id",
+            }
     # 2. Fallback to (target_group_id, target_topic_id)
     if cron.target_group_id is not None and cron.target_topic_id is not None:
         binding = get_topic_binding(conn, cron.target_group_id, cron.target_topic_id)
         if binding is not None:
             session = get_session(conn, binding.session_id)
-            return {"window_id": session.window_id if session else None,
-                    "session_id": binding.session_id, "topic_id": cron.target_topic_id,
-                    "source": "topic_id"}
+            return {
+                "window_id": session.window_id if session else None,
+                "session_id": binding.session_id,
+                "topic_id": cron.target_topic_id,
+                "source": "topic_id",
+            }
     # 3. Legacy target_window
     if cron.target_window:
         logger.warning(
             "cron %d (%r) uses deprecated target_window=%r — migrate to "
             "target_session_id or target_topic_id",
-            cron.id, cron.name, cron.target_window,
+            cron.id,
+            cron.name,
+            cron.target_window,
         )
-        return {"window_id": cron.target_window, "session_id": None,
-                "topic_id": None, "source": "legacy_window"}
+        return {
+            "window_id": cron.target_window,
+            "session_id": None,
+            "topic_id": None,
+            "source": "legacy_window",
+        }
     return None
 
 
@@ -663,7 +685,9 @@ def _row_to_cron(row: sqlite3.Row) -> Cron:
         last_run=row["last_run"],
         last_result=row["last_result"],
         created_at=row["created_at"],
-        target_session_id=row["target_session_id"] if "target_session_id" in keys else None,
+        target_session_id=row["target_session_id"]
+        if "target_session_id" in keys
+        else None,
         target_topic_id=row["target_topic_id"] if "target_topic_id" in keys else None,
         target_group_id=row["target_group_id"] if "target_group_id" in keys else None,
     )

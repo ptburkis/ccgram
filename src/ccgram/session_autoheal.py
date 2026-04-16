@@ -152,7 +152,7 @@ def _update_session_map_sync(
                 if map_file.exists():
                     try:
                         session_map = json.loads(map_file.read_text())
-                    except (json.JSONDecodeError, OSError):
+                    except json.JSONDecodeError, OSError:
                         pass
 
                 entry = session_map.get(window_key)
@@ -210,7 +210,7 @@ def _update_monitor_state_sync(
         if state_file.exists():
             try:
                 data = json.loads(state_file.read_text())
-            except (json.JSONDecodeError, OSError):
+            except json.JSONDecodeError, OSError:
                 pass
 
         tracked = data.get("tracked_sessions", {})

@@ -115,7 +115,9 @@ class TestCreateSessionHappyPath:
         assert binding.topic_id == 77
 
     @pytest.mark.asyncio
-    async def test_marker_file_written(self, ccgram_test_dir, stubs, monkeypatch, tmp_path):
+    async def test_marker_file_written(
+        self, ccgram_test_dir, stubs, monkeypatch, tmp_path
+    ):
         monkeypatch.setattr("ccgram.session_lifecycle.Path.home", lambda: tmp_path)
 
         session_id = await session_lifecycle.create_session(
@@ -136,9 +138,7 @@ class TestCreateSessionHappyPath:
 
 class TestCreateSessionExistingTopicFailures:
     @pytest.mark.asyncio
-    async def test_title_mismatch_raises_and_no_binding(
-        self, ccgram_test_dir, stubs
-    ):
+    async def test_title_mismatch_raises_and_no_binding(self, ccgram_test_dir, stubs):
         stubs.verify_topic.return_value = (True, "different-title")
 
         with pytest.raises(session_lifecycle.TopicVerificationError):
@@ -250,9 +250,7 @@ class TestCreateSessionRollback:
         assert bindings == []
 
     @pytest.mark.asyncio
-    async def test_duplicate_topic_binding_rolls_back(
-        self, ccgram_test_dir, stubs
-    ):
+    async def test_duplicate_topic_binding_rolls_back(self, ccgram_test_dir, stubs):
         """Two create_session() calls both resolve to the same (group_id, topic_id).
 
         The second attempt must raise ``sqlite3.IntegrityError`` (PK violation
@@ -339,9 +337,7 @@ class TestDeleteSession:
         )
         stubs.delete_topic.reset_mock()
 
-        await session_lifecycle.delete_session(
-            session_id, close_telegram_topic=True
-        )
+        await session_lifecycle.delete_session(session_id, close_telegram_topic=True)
 
         stubs.delete_topic.assert_awaited_once_with(-1001, 42)
 
@@ -418,6 +414,4 @@ async def test_integration_real_tmux_real_telegram():
             with store.connect() as conn:
                 assert store.get_session(conn, sid) is not None
         finally:
-            await session_lifecycle.delete_session(
-                sid, close_telegram_topic=True
-            )
+            await session_lifecycle.delete_session(sid, close_telegram_topic=True)

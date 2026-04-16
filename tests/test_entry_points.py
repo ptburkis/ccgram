@@ -28,7 +28,9 @@ def ccgram_test_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _make_update(user_id: int = 12345, thread_id: int = 42, topic_name: str = "new-proj"):
+def _make_update(
+    user_id: int = 12345, thread_id: int = 42, topic_name: str = "new-proj"
+):
     message = MagicMock()
     message.message_thread_id = thread_id
     message.chat = MagicMock()
@@ -61,9 +63,7 @@ async def test_forum_topic_created_handler_posts_picker():
     context = _make_context()
 
     with (
-        patch(
-            "ccgram.handlers.forum_topic_created.thread_router"
-        ) as mock_router,
+        patch("ccgram.handlers.forum_topic_created.thread_router") as mock_router,
         patch(
             "ccgram.handlers.forum_topic_created.safe_reply", new_callable=AsyncMock
         ) as mock_reply,
@@ -84,9 +84,7 @@ async def test_forum_topic_created_handler_skips_bound_topic():
     context = _make_context()
 
     with (
-        patch(
-            "ccgram.handlers.forum_topic_created.thread_router"
-        ) as mock_router,
+        patch("ccgram.handlers.forum_topic_created.thread_router") as mock_router,
         patch(
             "ccgram.handlers.forum_topic_created.safe_reply", new_callable=AsyncMock
         ) as mock_reply,
@@ -199,7 +197,9 @@ async def test_directory_callbacks_create_session_shadow_write(ccgram_test_dir):
     assert call_kwargs["existing_topic_id"] == 55
 
 
-async def test_directory_callbacks_shadow_write_failure_is_logged_not_raised(ccgram_test_dir):
+async def test_directory_callbacks_shadow_write_failure_is_logged_not_raised(
+    ccgram_test_dir,
+):
     from ccgram.handlers import directory_callbacks
 
     create_session_mock = AsyncMock(side_effect=RuntimeError("db gone"))
@@ -213,17 +213,35 @@ async def test_directory_callbacks_shadow_write_failure_is_logged_not_raised(ccg
     context = _make_context({PENDING_THREAD_ID: 55})
 
     with (
-        patch.object(directory_callbacks.tmux_manager, "create_window", new=AsyncMock(return_value=(True, "ok", "my-proj", "@99"))),
-        patch.object(directory_callbacks.tmux_manager, "stamp_pane_title", new=AsyncMock()),
+        patch.object(
+            directory_callbacks.tmux_manager,
+            "create_window",
+            new=AsyncMock(return_value=(True, "ok", "my-proj", "@99")),
+        ),
+        patch.object(
+            directory_callbacks.tmux_manager, "stamp_pane_title", new=AsyncMock()
+        ),
         patch.object(directory_callbacks, "safe_edit", new=AsyncMock()),
         patch.object(directory_callbacks, "_try_install_messaging_skill"),
         patch.object(directory_callbacks.thread_router, "bind_thread"),
         patch.object(directory_callbacks.thread_router, "set_group_chat_id"),
-        patch.object(directory_callbacks.session_manager, "get_window_state", return_value=MagicMock(cwd=None)),
+        patch.object(
+            directory_callbacks.session_manager,
+            "get_window_state",
+            return_value=MagicMock(cwd=None),
+        ),
         patch.object(directory_callbacks.session_manager, "set_window_provider"),
         patch.object(directory_callbacks.session_manager, "set_window_approval_mode"),
-        patch.object(directory_callbacks.session_manager, "wait_for_session_map_entry", new=AsyncMock()),
-        patch.object(directory_callbacks.provider_registry, "get", return_value=MagicMock(capabilities=MagicMock(supports_hook=False))),
+        patch.object(
+            directory_callbacks.session_manager,
+            "wait_for_session_map_entry",
+            new=AsyncMock(),
+        ),
+        patch.object(
+            directory_callbacks.provider_registry,
+            "get",
+            return_value=MagicMock(capabilities=MagicMock(supports_hook=False)),
+        ),
         patch.object(directory_callbacks.user_preferences, "update_user_mru"),
         patch("ccgram.session_lifecycle.create_session", create_session_mock),
     ):
@@ -241,7 +259,9 @@ async def test_directory_callbacks_shadow_write_failure_is_logged_not_raised(ccg
 # ---- topic_orchestration: Phase 5 Chunk J tests ----------------------------
 
 
-async def test_topic_orchestration_unbound_no_hint_posts_alert(ccgram_test_dir, monkeypatch):
+async def test_topic_orchestration_unbound_no_hint_posts_alert(
+    ccgram_test_dir, monkeypatch
+):
     """Path A: unbound window with no topic_id hint => alert sent, no topic created."""
     from ccgram.handlers import topic_orchestration
 
@@ -270,10 +290,15 @@ async def test_topic_orchestration_unbound_no_hint_posts_alert(ccgram_test_dir, 
     assert "@42" in call_kwargs["text"]
     assert "Suppressed auto-create" in call_kwargs["text"]
     # No create_forum_topic call — topic creation is retired.
-    assert not hasattr(mock_bot, "create_forum_topic") or not mock_bot.create_forum_topic.called
+    assert (
+        not hasattr(mock_bot, "create_forum_topic")
+        or not mock_bot.create_forum_topic.called
+    )
 
 
-async def test_topic_orchestration_unbound_with_existing_topic_id_uses_create_session(ccgram_test_dir):
+async def test_topic_orchestration_unbound_with_existing_topic_id_uses_create_session(
+    ccgram_test_dir,
+):
     """Path B: unbound window + explicit existing_topic_id => create_session called, no forum topic created."""
     from ccgram.handlers import topic_orchestration
 

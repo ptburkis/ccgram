@@ -100,7 +100,12 @@ async def test_title_drift_auto_fix(tmp_path):
     _setup_db(db)
     with store.connect(db) as conn:
         store.upsert_session(
-            conn, session_id="sid-1", cwd="/proj", agent="claude", status="active", window_id="@1"
+            conn,
+            session_id="sid-1",
+            cwd="/proj",
+            agent="claude",
+            status="active",
+            window_id="@1",
         )
         store.upsert_topic_binding(
             conn, group_id=GROUP, topic_id=10, session_id="sid-1", topic_title="old"
@@ -157,8 +162,7 @@ async def test_topic_1_never_flagged_as_orphan(tmp_path):
     )
     # Only topic 99 should flag as orphan; topic 1 is filtered.
     assert all(
-        "topic 1 " not in i.detail and "topic 1(" not in i.detail
-        for i in report.issues
+        "topic 1 " not in i.detail and "topic 1(" not in i.detail for i in report.issues
     )
     orphans = [i for i in report.issues if i.kind == "orphan_topic"]
     assert len(orphans) == 1
@@ -170,10 +174,19 @@ async def test_orphan_binding_topic_gone(tmp_path):
     _setup_db(db)
     with store.connect(db) as conn:
         store.upsert_session(
-            conn, session_id="sid-1", cwd="/proj", agent="claude", status="active", window_id="@1"
+            conn,
+            session_id="sid-1",
+            cwd="/proj",
+            agent="claude",
+            status="active",
+            window_id="@1",
         )
         store.upsert_topic_binding(
-            conn, group_id=GROUP, topic_id=10, session_id="sid-1", topic_title="gone-topic"
+            conn,
+            group_id=GROUP,
+            topic_id=10,
+            session_id="sid-1",
+            topic_title="gone-topic",
         )
 
     report = await reconcile(
@@ -196,10 +209,19 @@ async def test_orphan_binding_retired_session(tmp_path):
     _setup_db(db)
     with store.connect(db) as conn:
         store.upsert_session(
-            conn, session_id="sid-r", cwd="/proj", agent="claude", status="retired", window_id="@2"
+            conn,
+            session_id="sid-r",
+            cwd="/proj",
+            agent="claude",
+            status="retired",
+            window_id="@2",
         )
         store.upsert_topic_binding(
-            conn, group_id=GROUP, topic_id=20, session_id="sid-r", topic_title="retired-topic"
+            conn,
+            group_id=GROUP,
+            topic_id=20,
+            session_id="sid-r",
+            topic_title="retired-topic",
         )
 
     report = await reconcile(
@@ -240,7 +262,12 @@ async def test_ambiguous_session_manual_review(tmp_path):
     _setup_db(db)
     with store.connect(db) as conn:
         store.upsert_session(
-            conn, session_id="sid-x", cwd="/proj", agent="claude", status="active", window_id="@5"
+            conn,
+            session_id="sid-x",
+            cwd="/proj",
+            agent="claude",
+            status="active",
+            window_id="@5",
         )
 
     report = await reconcile(
@@ -264,10 +291,19 @@ async def test_dry_run_does_not_write(tmp_path):
     _setup_db(db)
     with store.connect(db) as conn:
         store.upsert_session(
-            conn, session_id="sid-1", cwd="/proj", agent="claude", status="active", window_id="@1"
+            conn,
+            session_id="sid-1",
+            cwd="/proj",
+            agent="claude",
+            status="active",
+            window_id="@1",
         )
         store.upsert_topic_binding(
-            conn, group_id=GROUP, topic_id=10, session_id="sid-1", topic_title="old-title"
+            conn,
+            group_id=GROUP,
+            topic_id=10,
+            session_id="sid-1",
+            topic_title="old-title",
         )
 
     report = await reconcile(
@@ -293,10 +329,20 @@ async def test_apply_writes_only_auto_fix(tmp_path):
     _setup_db(db)
     with store.connect(db) as conn:
         store.upsert_session(
-            conn, session_id="sid-1", cwd="/proj", agent="claude", status="active", window_id="@1"
+            conn,
+            session_id="sid-1",
+            cwd="/proj",
+            agent="claude",
+            status="active",
+            window_id="@1",
         )
         store.upsert_session(
-            conn, session_id="sid-2", cwd="/other", agent="claude", status="active", window_id="@2"
+            conn,
+            session_id="sid-2",
+            cwd="/other",
+            agent="claude",
+            status="active",
+            window_id="@2",
         )
         store.upsert_topic_binding(
             conn, group_id=GROUP, topic_id=10, session_id="sid-1", topic_title="old"
@@ -310,7 +356,9 @@ async def test_apply_writes_only_auto_fix(tmp_path):
         dry_run=False,
         db_path=db,
         tmux_fetcher=lambda: _tmux([("@1", "w1", "/proj"), ("@2", "w2", "/other")]),
-        topic_fetcher=lambda gid: _topics([make_topic(10, "new"), make_topic(99, "unbound")]),
+        topic_fetcher=lambda gid: _topics(
+            [make_topic(10, "new"), make_topic(99, "unbound")]
+        ),
         session_identity_fetcher=lambda: _identity({"@1": "sid-1", "@2": "sid-2"}),
     )
 

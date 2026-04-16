@@ -154,7 +154,7 @@ def _load_bg_work_state() -> None:
 
         if _BG_WORK_STATE_FILE.exists():
             _bg_work_shown = json.loads(_BG_WORK_STATE_FILE.read_text())
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         pass
 
 
@@ -174,7 +174,7 @@ def _load_effort_state() -> None:
 
         if _EFFORT_STATE_FILE.exists():
             _effort_shown = json.loads(_EFFORT_STATE_FILE.read_text())
-    except (OSError, ValueError):
+    except OSError, ValueError:
         pass
 
 
@@ -212,9 +212,7 @@ def _parse_effort(pane_text: str) -> str | None:
     return _EFFORT_CHAR_MAP.get(char)
 
 
-_RE_EFFORT_SUFFIX = _re.compile(
-    r"(?:\s+(?:\[H\]|\[M\]|\[L\]|\u26a1|\U0001f41a))+$"
-)
+_RE_EFFORT_SUFFIX = _re.compile(r"(?:\s+(?:\[H\]|\[M\]|\[L\]|\u26a1|\U0001f41a))+$")
 
 
 def _strip_effort_suffix(name: str) -> str:
@@ -337,6 +335,7 @@ async def _fetch_live_topic_title(chat_id: int, thread_id: int) -> str | None:
     """
     try:
         from ..mtproto_client import MTProtoClient  # lazy import — avoids hard dep
+
         client = MTProtoClient()
         async with client:
             topics = await client.get_forum_topics_by_id(chat_id, [thread_id])
@@ -365,7 +364,11 @@ async def _apply_effort_suffix(
     behaviour when MTProto is unavailable. Never blocks the poll loop.
     """
     user_id = next(
-        (uid for uid, tid, wid in thread_router.iter_thread_bindings() if wid == window_id),
+        (
+            uid
+            for uid, tid, wid in thread_router.iter_thread_bindings()
+            if wid == window_id
+        ),
         0,
     )
     chat_id = thread_router.resolve_chat_id(user_id, thread_id)
@@ -374,7 +377,11 @@ async def _apply_effort_suffix(
 
     # Prefer authoritative live title; fall back to locally-stored display name.
     live_title = await _fetch_live_topic_title(chat_id, thread_id)
-    display = live_title if live_title is not None else (thread_router.get_display_name(window_id) or "")
+    display = (
+        live_title
+        if live_title is not None
+        else (thread_router.get_display_name(window_id) or "")
+    )
 
     live_base = _strip_effort_suffix(display)
     window_name = thread_router.get_display_name(window_id) or window_id

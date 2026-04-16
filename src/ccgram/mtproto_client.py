@@ -238,8 +238,7 @@ class MTProtoClient:
         self._api_id: int = api_id
         self._api_hash: str = api_hash
         self._session_stem: str = (
-            session_stem if session_stem is not None
-            else str(ccgram_dir() / "mtproto")
+            session_stem if session_stem is not None else str(ccgram_dir() / "mtproto")
         )
         self._client: object | None = None
 
@@ -249,7 +248,10 @@ class MTProtoClient:
     def _ensure_telethon_client(self) -> None:
         if self._client is None:
             from telethon import TelegramClient  # lazy import
-            self._client = TelegramClient(self._session_stem, self._api_id, self._api_hash)
+
+            self._client = TelegramClient(
+                self._session_stem, self._api_id, self._api_hash
+            )
 
     async def login(self, *, phone: str | None = None) -> None:
         """Interactive login — prompts for phone/code if needed. Idempotent."""

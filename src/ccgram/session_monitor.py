@@ -105,7 +105,7 @@ def _find_last_user_turn_offset(file_path: "Path") -> int:
 
     try:
         text = data.decode("utf-8", errors="replace")
-    except (UnicodeDecodeError, ValueError):
+    except UnicodeDecodeError, ValueError:
         return len(data)
 
     # Walk line starts so we can map back from parsed line index to byte offset
@@ -995,7 +995,7 @@ class SessionMonitor:
             return
         try:
             sm = json.loads(config.session_map_file.read_text())
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError, OSError:
             return
 
         canonical = config.tmux_session_name or "ccgram"
@@ -1017,7 +1017,7 @@ class SessionMonitor:
         # Pull live tmux windows once for lookup
         try:
             live_windows = await tmux_manager.list_windows()
-        except (OSError, _PathResolveError):
+        except OSError, _PathResolveError:
             return
         win_by_id = {w.window_id: w for w in live_windows}
 
@@ -1081,7 +1081,7 @@ class SessionMonitor:
                     if not first:
                         continue
                     d = json.loads(first)
-                except (OSError, json.JSONDecodeError):
+                except OSError, json.JSONDecodeError:
                     continue
                 # Sanity check: the first line must be a recognisable Claude
                 # transcript entry. Claude Code writes various metadata types

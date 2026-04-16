@@ -237,7 +237,7 @@ class SessionManager:
                 bindings = store.list_topic_bindings(conn)
                 gchat_rows = store.list_prefs(conn, "group_chat")
                 window_rows = store.list_prefs(conn, "window")
-        except (sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError):
+        except sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError:
             return False
 
         if not sessions and not bindings:
@@ -252,7 +252,7 @@ class SessionManager:
                 user_id_str, topic_id_str = key.split(":", 1)
                 gid_tid_to_uid[(int(value), int(topic_id_str))] = int(user_id_str)
                 group_chat_ids[key] = int(value)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
 
         if bindings and not gid_tid_to_uid:

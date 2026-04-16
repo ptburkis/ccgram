@@ -72,7 +72,7 @@ def _format_codex_tool_result(raw_tool_name: str, output_text: str) -> str:
     if raw_tool_name == "apply_patch":
         try:
             parsed = json.loads(output_text)
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError, TypeError:
             parsed = None
         if isinstance(parsed, dict):
             result_text = parsed.get("output", "") or parsed.get("result", "")
@@ -307,7 +307,7 @@ def _parse_custom_tool_call_output(
     if isinstance(raw_output, str):
         try:
             parsed = json.loads(raw_output)
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError, TypeError:
             parsed = None
         if isinstance(parsed, dict) and "output" in parsed:
             output_text = str(parsed["output"]).strip()
@@ -573,7 +573,7 @@ def _resolve_jsonl_for_pty(pane_tty: str) -> Path | None:
                 rparen = stat_data.rindex(")")
                 fields = stat_data[rparen + 2 :].split()
                 ppid = int(fields[1])
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 continue
             if ppid == parent_pid:
                 pids_to_check.append(int(entry.name))
@@ -594,7 +594,7 @@ def _resolve_jsonl_for_pty(pane_tty: str) -> Path | None:
                 rparen = stat_data.rindex(")")
                 fields = stat_data[rparen + 2 :].split()
                 ppid = int(fields[1])
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 continue
             if ppid in pids_to_check and int(entry.name) not in pids_to_check:
                 extra.append(int(entry.name))

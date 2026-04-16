@@ -61,10 +61,11 @@ class MonitorState:
         """
         # Attempt DB read first
         from . import store
+
         try:
             with store.connect() as conn:
                 prefs = store.list_prefs(conn, "monitor")
-        except (sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError):
+        except sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError:
             prefs = []
         if prefs:
             # Rehydrate tracked_sessions from (scope_id=session_id, key, value)
@@ -86,8 +87,7 @@ class MonitorState:
             )
             return
         logger.warning(
-            "falling back to legacy monitor_state.json"
-            " — DB is empty or unavailable"
+            "falling back to legacy monitor_state.json — DB is empty or unavailable"
         )
         if not self.state_file.exists():
             logger.debug("State file does not exist: %s", self.state_file)

@@ -85,7 +85,13 @@ class _StubMTProto:
         from ccgram.mtproto_client import ForumTopic
 
         return [
-            ForumTopic(topic_id=tid, title=title, top_msg_id=0, is_closed=False, is_hidden=False)
+            ForumTopic(
+                topic_id=tid,
+                title=title,
+                top_msg_id=0,
+                is_closed=False,
+                is_hidden=False,
+            )
             for tid, title in self.topics.items()
         ]
 

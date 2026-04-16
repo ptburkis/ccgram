@@ -595,7 +595,9 @@ async def _create_window_and_bind(  # noqa: PLR0912
         try:
             from ccgram import session_lifecycle as _sl
 
-            group_id = chat.id if (chat and chat.type in ("group", "supergroup")) else None
+            group_id = (
+                chat.id if (chat and chat.type in ("group", "supergroup")) else None
+            )
             if group_id is not None:
                 await _sl.create_session(
                     cwd=selected_path,

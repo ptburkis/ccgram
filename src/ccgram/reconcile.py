@@ -366,7 +366,9 @@ def _apply_issue(issue: ReconcileIssue, db_path: Path | None) -> bool:
             return False
         try:
             with store.connect(db_path) as conn:
-                existing = store.get_topic_binding(conn, fix["group_id"], fix["topic_id"])
+                existing = store.get_topic_binding(
+                    conn, fix["group_id"], fix["topic_id"]
+                )
                 if existing is None:
                     logger.warning(
                         "reconcile.apply.binding_gone",

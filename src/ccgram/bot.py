@@ -96,11 +96,14 @@ from .handlers.message_sender import safe_reply
 from .handlers.response_builder import build_response_parts
 from .handlers.polling_coordinator import status_poll_loop
 from .handlers.file_handler import handle_document_message, handle_photo_message
-from .handlers.forum_topic_created import forum_topic_created_handler as _forum_topic_created_handler
+from .handlers.forum_topic_created import (
+    forum_topic_created_handler as _forum_topic_created_handler,
+)
 from .handlers.voice_handler import handle_voice_message
 from .handlers.text_handler import handle_text_message
 from .session import session_manager
 from .user_preferences import user_preferences
+from . import store
 from .session_monitor import NewMessage, NewWindowEvent, SessionMonitor
 from .thread_router import thread_router
 from .telegram_request import ResilientPollingHTTPXRequest
@@ -831,7 +834,9 @@ async def post_init(application: Application) -> None:
     # State unification: wire session_lifecycle with production deps.
     from ccgram import session_lifecycle as _session_lifecycle
     from ccgram.mtproto_client import MTProtoClient as _MTProtoClient
-    from ccgram.mtproto_client import MTProtoCredentialsError as _MTProtoCredentialsError
+    from ccgram.mtproto_client import (
+        MTProtoCredentialsError as _MTProtoCredentialsError,
+    )
 
     try:
         _mtproto_client = _MTProtoClient()
@@ -843,9 +848,7 @@ async def post_init(application: Application) -> None:
         )
 
         class _StubMTProtoClient:
-            async def get_forum_topics_by_id(
-                self, *_: object, **__: object
-            ) -> list:
+            async def get_forum_topics_by_id(self, *_: object, **__: object) -> list:
                 return []
 
         _mtproto_client = _StubMTProtoClient()  # type: ignore[assignment]
@@ -1096,16 +1099,24 @@ async def files_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> 
             update.message, "\u274c This topic is not bound to any session."
         )
         return
-    # Get the cwd from window state or tmux
-    state = session_manager.get_window_state(window_id)
-    cwd = state.cwd if state and state.cwd else ""
+    # Resolve cwd: DB session first (most accurate), then window state, then tmux
+    cwd = ""
+    with store.connect() as conn:
+        db_session = store.get_session_by_window(conn, window_id)
+        if db_session and db_session.cwd:
+            cwd = db_session.cwd
+    if not cwd:
+        state = session_manager.get_window_state(window_id)
+        cwd = state.cwd if state and state.cwd else ""
     if not cwd:
         all_windows = await tmux_manager.list_windows()
         window = next((w for w in all_windows if w.window_id == window_id), None)
         cwd = window.cwd if window else ""
     if not cwd:
         await safe_reply(
-            update.message, "\u274c Could not determine project directory."
+            update.message,
+            "\u274c Could not determine project directory. "
+            "Try running `claude-hub reconcile` to re-bind this session.",
         )
         return
     # Build relative path from ~/projects/
@@ -1360,10 +1371,14 @@ async def effort_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not args:
         # Show current stored level
         from .handlers.polling_coordinator import _effort_shown
+
         current = _effort_shown.get(window_id)
         labels = {"H": "high", "M": "medium", "L": "low"}
         label = labels.get(current, "not yet set") if current else "not yet set"
-        await safe_reply(message, f"Effort for {window_id}: **{label}**\nUsage: /effort <high|medium|low|auto>")
+        await safe_reply(
+            message,
+            f"Effort for {window_id}: **{label}**\nUsage: /effort <high|medium|low|auto>",
+        )
         return
 
     level = args[0].lower()
@@ -1375,6 +1390,7 @@ async def effort_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Inject the command into the tmux window
     from .tmux_manager import send_to_window
+
     cmd = f"/effort {level}"
     success, err = await send_to_window(window_id, cmd)
     if success:

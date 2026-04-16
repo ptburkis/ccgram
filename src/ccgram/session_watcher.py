@@ -55,7 +55,12 @@ def _get_pane_pid(window_id: str) -> int | None:
         if not stripped:
             return None
         return int(stripped)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+        ValueError,
+    ):
         return None
 
 
@@ -64,7 +69,7 @@ def _read_proc_environ(pid: int) -> bytes | None:
     try:
         with open(f"/proc/{pid}/environ", "rb") as fh:
             return fh.read()
-    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+    except FileNotFoundError, PermissionError, ProcessLookupError, OSError:
         return None
 
 
@@ -77,7 +82,7 @@ def _get_child_pids(pid: int) -> list[int]:
                 continue
             try:
                 content = (entry / "status").read_text()
-            except (FileNotFoundError, PermissionError, OSError):
+            except FileNotFoundError, PermissionError, OSError:
                 continue
             for line in content.splitlines():
                 if line.startswith("PPid:"):
@@ -98,7 +103,7 @@ def _extract_session_id_from_environ(environ_bytes: bytes) -> str | None:
     prefix = b"CCGRAM_SESSION_ID="
     for entry in environ_bytes.split(b"\x00"):
         if entry.startswith(prefix):
-            value = entry[len(prefix):].decode("utf-8", errors="replace")
+            value = entry[len(prefix) :].decode("utf-8", errors="replace")
             return value if value else None
     return None
 
@@ -182,7 +187,6 @@ def scan_all_pane_identities(window_ids: list[str]) -> dict[str, str]:
             )
 
     return result
-
 
 
 def _is_enabled() -> bool:
@@ -412,7 +416,7 @@ def _find_window_for_jsonl(
 
     try:
         session_map: dict = json.loads(map_file.read_text())
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         return None
 
     stem = jsonl_path.stem

@@ -224,9 +224,7 @@ async def handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
         return
 
     if _is_window_already_bound(event.window_id):
-        logger.debug(
-            "New window %s already bound, skipping alert", event.window_id
-        )
+        logger.debug("New window %s already bound, skipping alert", event.window_id)
         return
 
     await _auto_detect_provider(event.window_id)

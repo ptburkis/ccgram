@@ -140,9 +140,7 @@ async def _not_configured(*_: object, **__: object) -> None:
 
 
 def _sync_not_configured(*_: object, **__: object) -> str:
-    raise NotConfiguredError(
-        "session_lifecycle resolve_launch_fn not configured"
-    )
+    raise NotConfiguredError("session_lifecycle resolve_launch_fn not configured")
 
 
 # Module-level injectable functions. Tests replace these with mocks; production
@@ -270,9 +268,7 @@ async def create_session(
         # Step 3: tmux window.
         window_id = await _tmux_create_window_fn(cwd, topic_name)
         if not window_id:
-            raise SessionLifecycleError(
-                "tmux_create_window returned empty window_id"
-            )
+            raise SessionLifecycleError("tmux_create_window returned empty window_id")
 
         # Step 4: launch agent with CCGRAM_SESSION_ID marker.
         try:
@@ -280,9 +276,7 @@ async def create_session(
             # Prefix with inline env so child process inherits the marker.
             # ``foo=bar cmd args`` works in bash/zsh; keeps the single
             # send_keys roundtrip cheap.
-            full_cmd = (
-                f"CCGRAM_SESSION_ID={shlex.quote(session_id)} {launch_cmd}"
-            )
+            full_cmd = f"CCGRAM_SESSION_ID={shlex.quote(session_id)} {launch_cmd}"
             await _tmux_send_keys_fn(window_id, full_cmd)
             # Write per-window session_id marker file (atomic replace) so
             # the transcript watcher can resolve window -> session_id even
@@ -353,9 +347,7 @@ async def delete_session(
     with store.connect() as conn:
         session = store.get_session(conn, session_id)
         if session is None:
-            logger.debug(
-                "session_lifecycle.delete_noop_unknown", session_id=session_id
-            )
+            logger.debug("session_lifecycle.delete_noop_unknown", session_id=session_id)
             return
         binding = store.get_binding_for_session(conn, session_id)
 
@@ -395,9 +387,7 @@ async def delete_session(
     # topic_binding row", explicitly drop the binding here.
     with store.connect() as conn:
         if binding is not None:
-            store.delete_topic_binding(
-                conn, binding.group_id, binding.topic_id
-            )
+            store.delete_topic_binding(conn, binding.group_id, binding.topic_id)
         store.upsert_session(
             conn,
             session_id=session.session_id,
@@ -586,9 +576,7 @@ def build_default_deps(  # noqa: C901 — adapter factory with N thin closures
             window_id, text, raw=True
         )
         if not ok:
-            raise SessionLifecycleError(
-                f"tmux send_keys failed for window {window_id}"
-            )
+            raise SessionLifecycleError(f"tmux send_keys failed for window {window_id}")
 
     async def _tmux_kill(window_id: str) -> None:
         await tmux_manager_obj.kill_window(window_id)  # type: ignore[attr-defined]
@@ -606,5 +594,3 @@ def build_default_deps(  # noqa: C901 — adapter factory with N thin closures
         tmux_kill_window=_tmux_kill,
         resolve_launch_command=_resolve,
     )
-
-

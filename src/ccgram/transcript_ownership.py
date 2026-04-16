@@ -37,6 +37,7 @@ def jsonl_has_hook_marker(path: Path, window_id: str, window_name: str) -> bool:
     """
     try:
         import re as _re
+
         stem = path.stem
         marker = (
             f"tmux key=ccgram:{window_id}, window_name={window_name}, session_id={stem}"
@@ -56,9 +57,9 @@ def jsonl_has_hook_marker(path: Path, window_id: str, window_name: str) -> bool:
         # AND session_id match — this prevents legitimate continuations from
         # being flagged as bleed bugs after a tmux restart.
         name_pattern = (
-            rb'tmux key=ccgram:@\w+, window_name='
+            rb"tmux key=ccgram:@\w+, window_name="
             + _re.escape(window_name.encode())
-            + rb', session_id='
+            + rb", session_id="
             + _re.escape(stem.encode())
         )
         return len(_re.findall(name_pattern, content)) >= 2

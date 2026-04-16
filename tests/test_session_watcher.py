@@ -47,7 +47,9 @@ def test_marker_file_empty(home_dir):
 def test_env_resolve_finds_in_immediate_pane_pid(monkeypatch):
     env = b"CCGRAM_SESSION_ID=sid-direct\x00PATH=/usr/bin"
     monkeypatch.setattr(session_watcher, "_get_pane_pid", lambda wid: 12345)
-    monkeypatch.setattr(session_watcher, "_read_proc_environ", lambda pid: env if pid == 12345 else None)
+    monkeypatch.setattr(
+        session_watcher, "_read_proc_environ", lambda pid: env if pid == 12345 else None
+    )
     monkeypatch.setattr(session_watcher, "_get_child_pids", lambda pid: [])
     assert read_session_id_from_pane_env("@0") == "sid-direct"
 
@@ -60,7 +62,9 @@ def test_env_resolve_bfs_walks_one_level(monkeypatch):
 
     monkeypatch.setattr(session_watcher, "_get_pane_pid", lambda wid: 100)
     monkeypatch.setattr(session_watcher, "_read_proc_environ", mock_environ)
-    monkeypatch.setattr(session_watcher, "_get_child_pids", lambda pid: [200] if pid == 100 else [])
+    monkeypatch.setattr(
+        session_watcher, "_get_child_pids", lambda pid: [200] if pid == 100 else []
+    )
     assert read_session_id_from_pane_env("@0") == "sid-xyz"
 
 

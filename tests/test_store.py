@@ -58,8 +58,13 @@ class TestSchema:
     def test_tables_exist(self, conn):
         names = store.table_names(conn)
         required = {
-            "sessions", "topic_bindings", "orphaned_topics",
-            "heartbeats", "crons", "user_prefs", "schema_meta",
+            "sessions",
+            "topic_bindings",
+            "orphaned_topics",
+            "heartbeats",
+            "crons",
+            "user_prefs",
+            "schema_meta",
         }
         assert required <= set(names)
 
@@ -124,10 +129,16 @@ class TestSessions:
         self._insert(conn)
         s1 = store.get_session(conn, "sess-1")
         import time
+
         time.sleep(0.01)
         store.upsert_session(
-            conn, session_id="sess-1", cwd="/cwd-new", agent="codex",
-            status="retired", window_id=None, created_at=999,
+            conn,
+            session_id="sess-1",
+            cwd="/cwd-new",
+            agent="codex",
+            status="retired",
+            window_id=None,
+            created_at=999,
         )
         s2 = store.get_session(conn, "sess-1")
         assert s2 is not None
@@ -169,14 +180,22 @@ class TestSessions:
 
 class TestTopicBindings:
     def _session(self, conn, sid, window_id):
-        store.upsert_session(conn, session_id=sid, cwd="/c", agent="claude",
-                             status="active", window_id=window_id, created_at=0)
+        store.upsert_session(
+            conn,
+            session_id=sid,
+            cwd="/c",
+            agent="claude",
+            status="active",
+            window_id=window_id,
+            created_at=0,
+        )
 
     def test_unique_session_id_violation(self, conn):
         self._session(conn, "s1", "@1")
         self._session(conn, "s2", "@2")
-        store.upsert_topic_binding(conn, group_id=1, topic_id=10,
-                                   session_id="s1", topic_title="T1")
+        store.upsert_topic_binding(
+            conn, group_id=1, topic_id=10, session_id="s1", topic_title="T1"
+        )
         # Same session_id in a different PK row — UNIQUE constraint fires
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
@@ -189,18 +208,21 @@ class TestTopicBindings:
     def test_pk_conflict_updates_in_place(self, conn):
         self._session(conn, "s1", "@1")
         self._session(conn, "s2", "@2")
-        store.upsert_topic_binding(conn, group_id=1, topic_id=10,
-                                   session_id="s1", topic_title="Old")
-        store.upsert_topic_binding(conn, group_id=1, topic_id=10,
-                                   session_id="s2", topic_title="New")
+        store.upsert_topic_binding(
+            conn, group_id=1, topic_id=10, session_id="s1", topic_title="Old"
+        )
+        store.upsert_topic_binding(
+            conn, group_id=1, topic_id=10, session_id="s2", topic_title="New"
+        )
         rows = conn.execute("SELECT * FROM topic_bindings").fetchall()
         assert len(rows) == 1
         assert rows[0]["topic_title"] == "New"
 
     def test_fk_cascade_on_session_delete(self, conn):
         self._session(conn, "s1", "@1")
-        store.upsert_topic_binding(conn, group_id=1, topic_id=10,
-                                   session_id="s1", topic_title="T1")
+        store.upsert_topic_binding(
+            conn, group_id=1, topic_id=10, session_id="s1", topic_title="T1"
+        )
         store.delete_session(conn, "s1")
         assert store.get_topic_binding(conn, 1, 10) is None
 
@@ -219,8 +241,9 @@ class TestTopicBindings:
 
 class TestOrphanedTopics:
     def test_upsert_list_delete(self, conn):
-        store.upsert_orphaned_topic(conn, group_id=5, topic_id=99,
-                                    topic_title="Orphan", first_seen=100)
+        store.upsert_orphaned_topic(
+            conn, group_id=5, topic_id=99, topic_title="Orphan", first_seen=100
+        )
         rows = store.list_orphaned_topics(conn)
         assert len(rows) == 1
         assert rows[0].topic_title == "Orphan"
@@ -230,10 +253,12 @@ class TestOrphanedTopics:
         assert store.list_orphaned_topics(conn) == []
 
     def test_filter_by_group(self, conn):
-        store.upsert_orphaned_topic(conn, group_id=1, topic_id=1,
-                                    topic_title="A", first_seen=0)
-        store.upsert_orphaned_topic(conn, group_id=2, topic_id=2,
-                                    topic_title="B", first_seen=0)
+        store.upsert_orphaned_topic(
+            conn, group_id=1, topic_id=1, topic_title="A", first_seen=0
+        )
+        store.upsert_orphaned_topic(
+            conn, group_id=2, topic_id=2, topic_title="B", first_seen=0
+        )
         assert len(store.list_orphaned_topics(conn, group_id=1)) == 1
         assert len(store.list_orphaned_topics(conn, group_id=2)) == 1
 
@@ -270,8 +295,13 @@ class TestHeartbeats:
 class TestCrons:
     def _cron(self, conn, cid=1, enabled=True):
         store.upsert_cron(
-            conn, id=cid, name=f"Cron-{cid}", schedule="0 * * * *",
-            target_window="@1", message="hello", enabled=enabled,
+            conn,
+            id=cid,
+            name=f"Cron-{cid}",
+            schedule="0 * * * *",
+            target_window="@1",
+            message="hello",
+            enabled=enabled,
             created_at=1000,
         )
 
@@ -411,16 +441,24 @@ class TestMigration:
         for tbl in snap1:
             if tbl == "user_prefs":
                 rows1 = sorted(
-                    [{k: v for k, v in r.items() if k != "updated_at"} for r in snap1[tbl]],
+                    [
+                        {k: v for k, v in r.items() if k != "updated_at"}
+                        for r in snap1[tbl]
+                    ],
                     key=lambda r: (r["scope"], r["scope_id"], r["key"]),
                 )
                 rows2 = sorted(
-                    [{k: v for k, v in r.items() if k != "updated_at"} for r in snap2[tbl]],
+                    [
+                        {k: v for k, v in r.items() if k != "updated_at"}
+                        for r in snap2[tbl]
+                    ],
                     key=lambda r: (r["scope"], r["scope_id"], r["key"]),
                 )
                 assert rows1 == rows2, f"Table {tbl} differs after second migration"
             else:
-                assert snap1[tbl] == snap2[tbl], f"Table {tbl} differs after second migration"
+                assert snap1[tbl] == snap2[tbl], (
+                    f"Table {tbl} differs after second migration"
+                )
 
     def test_migration_duplicate_session_binding_skipped(self, tmp_path, mig, caplog):
         fixture_dir = tmp_path / "fixtures"
@@ -541,8 +579,13 @@ class TestSchemaV2Migration:
 class TestCronV2Fields:
     def test_upsert_and_retrieve_new_fields(self, conn):
         store.upsert_cron(
-            conn, id=99, name="Test", schedule="0 * * * *",
-            target_window="old-window", message="msg", enabled=True,
+            conn,
+            id=99,
+            name="Test",
+            schedule="0 * * * *",
+            target_window="old-window",
+            message="msg",
+            enabled=True,
             created_at=0,
             target_session_id="sess-abc",
             target_topic_id=42,
@@ -556,8 +599,14 @@ class TestCronV2Fields:
 
     def test_new_fields_default_to_none(self, conn):
         store.upsert_cron(
-            conn, id=100, name="Legacy", schedule="0 * * * *",
-            target_window="win", message="msg", enabled=True, created_at=0,
+            conn,
+            id=100,
+            name="Legacy",
+            schedule="0 * * * *",
+            target_window="win",
+            message="msg",
+            enabled=True,
+            created_at=0,
         )
         c = store.get_cron(conn, 100)
         assert c is not None
@@ -571,18 +620,40 @@ class TestCronV2Fields:
 
 class TestResolveCronTarget:
     def _session(self, conn, sid, window_id):
-        store.upsert_session(conn, session_id=sid, cwd="/c", agent="claude",
-                             status="active", window_id=window_id, created_at=0)
+        store.upsert_session(
+            conn,
+            session_id=sid,
+            cwd="/c",
+            agent="claude",
+            status="active",
+            window_id=window_id,
+            created_at=0,
+        )
 
     def _binding(self, conn, sid, group_id, topic_id):
-        store.upsert_topic_binding(conn, group_id=group_id, topic_id=topic_id,
-                                   session_id=sid, topic_title="T", bound_at=0)
+        store.upsert_topic_binding(
+            conn,
+            group_id=group_id,
+            topic_id=topic_id,
+            session_id=sid,
+            topic_title="T",
+            bound_at=0,
+        )
 
     def _cron(self, **kwargs) -> store.Cron:
         defaults = dict(
-            id=1, name="t", schedule="*", target_window="", message="m",
-            enabled=True, last_run=None, last_result=None, created_at=0,
-            target_session_id=None, target_topic_id=None, target_group_id=None,
+            id=1,
+            name="t",
+            schedule="*",
+            target_window="",
+            message="m",
+            enabled=True,
+            last_run=None,
+            last_result=None,
+            created_at=0,
+            target_session_id=None,
+            target_topic_id=None,
+            target_group_id=None,
         )
         defaults.update(kwargs)
         return store.Cron(**defaults)
