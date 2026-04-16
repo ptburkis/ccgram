@@ -61,7 +61,9 @@ every caller to configure or stub.
 from __future__ import annotations
 
 import contextlib
+import json
 import shlex
+import shutil
 import sqlite3
 import uuid
 from collections.abc import Awaitable, Callable
@@ -270,6 +272,9 @@ async def create_session(
         if not window_id:
             raise SessionLifecycleError("tmux_create_window returned empty window_id")
 
+        # Step 3b: bootstrap write-path hooks into the project's settings.json.
+        _bootstrap_hook_config(cwd)
+
         # Step 4: launch agent with CCGRAM_SESSION_ID marker.
         try:
             launch_cmd = _resolve_launch_fn(agent, mode)
@@ -403,6 +408,126 @@ async def delete_session(
 
 
 # ---- Internal: helpers -------------------------------------------------------
+
+
+def _bootstrap_hook_config(cwd: str) -> None:
+    """Write/merge write-path hooks into <cwd>/.claude/settings.json.
+
+    Idempotent:
+    - If the hook commands are already present, skip (no clobber).
+    - If other hooks exist and ours are absent, merge by appending.
+    - On any error, log a WARNING and continue -- never block session creation.
+
+    Also copies scripts/hooks/*.py to ~/.ccgram/hooks/ if stale or absent.
+    """
+    _deploy_hook_scripts()
+
+    settings_path = Path(cwd) / ".claude" / "settings.json"
+    pre_cmd = "python3 ~/.ccgram/hooks/check-write-path.py"
+    post_cmd = "python3 ~/.ccgram/hooks/rewrite-output-url.py"
+
+    desired_pre = {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [{"type": "command", "command": pre_cmd}],
+    }
+    desired_post = {
+        "matcher": "Write|Edit|NotebookEdit|Read|Bash",
+        "hooks": [{"type": "command", "command": post_cmd}],
+    }
+
+    try:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        if settings_path.exists():
+            try:
+                existing = json.loads(settings_path.read_text())
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "session_lifecycle.bootstrap_hooks_bad_json",
+                    path=str(settings_path),
+                    error=str(exc),
+                )
+                return
+        else:
+            existing = {}
+
+        hooks = existing.setdefault("hooks", {})
+        pre_list: list = hooks.setdefault("PreToolUse", [])
+        post_list: list = hooks.setdefault("PostToolUse", [])
+
+        def _has_command(hook_list: list, cmd: str) -> bool:
+            for entry in hook_list:
+                for h in entry.get("hooks", []):
+                    if h.get("command") == cmd:
+                        return True
+            return False
+
+        def _has_conflicting(hook_list: list, matcher: str, our_cmd: str) -> bool:
+            for entry in hook_list:
+                if entry.get("matcher") == matcher:
+                    for h in entry.get("hooks", []):
+                        if h.get("type") == "command" and h.get("command") != our_cmd:
+                            return True
+            return False
+
+        modified = False
+
+        if not _has_command(pre_list, pre_cmd):
+            if _has_conflicting(pre_list, desired_pre["matcher"], pre_cmd):
+                logger.warning(
+                    "session_lifecycle.bootstrap_hooks_conflict",
+                    path=str(settings_path),
+                    hook="PreToolUse",
+                    reason="conflicting matcher entry exists; skipping",
+                )
+            else:
+                pre_list.append(desired_pre)
+                modified = True
+
+        if not _has_command(post_list, post_cmd):
+            if _has_conflicting(post_list, desired_post["matcher"], post_cmd):
+                logger.warning(
+                    "session_lifecycle.bootstrap_hooks_conflict",
+                    path=str(settings_path),
+                    hook="PostToolUse",
+                    reason="conflicting matcher entry exists; skipping",
+                )
+            else:
+                post_list.append(desired_post)
+                modified = True
+
+        if modified:
+            tmp = settings_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(existing, indent=2))
+            tmp.replace(settings_path)
+            logger.info(
+                "session_lifecycle.bootstrap_hooks_written",
+                path=str(settings_path),
+            )
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "session_lifecycle.bootstrap_hooks_failed",
+            cwd=cwd,
+            error=str(exc),
+        )
+
+
+def _deploy_hook_scripts() -> None:
+    """Copy scripts/hooks/*.py to ~/.ccgram/hooks/ if absent or stale."""
+    repo_hooks = Path(__file__).parent.parent.parent / "scripts" / "hooks"
+    dest_dir = Path.home() / ".ccgram" / "hooks"
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        if not repo_hooks.is_dir():
+            return
+        for src in repo_hooks.glob("*.py"):
+            dst = dest_dir / src.name
+            if not dst.exists() or src.stat().st_mtime > dst.stat().st_mtime:
+                shutil.copy2(src, dst)
+                dst.chmod(0o755)
+                logger.info("session_lifecycle.hook_script_deployed", script=str(dst))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("session_lifecycle.deploy_hook_scripts_failed", error=str(exc))
 
 
 def _write_session_marker_file(window_id: str, session_id: str) -> None:
