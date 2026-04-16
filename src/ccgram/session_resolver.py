@@ -200,12 +200,31 @@ class SessionResolver:
     def find_users_for_session(
         self,
         session_id: str,
+        *,
+        window_id_hint: str = "",
     ) -> list[tuple[int, str, int]]:
-        """Find all users whose thread-bound window maps to the given session_id."""
+        """Find users whose thread-bound window maps to session_id.
+
+        Falls back to window_id_hint when session_id isn't in window_states —
+        needed for hookless providers (Codex/Gemini) whose internal session_id
+        differs from the ccgram DB session_id stored in window_states.
+        """
         result: list[tuple[int, str, int]] = []
         for user_id, thread_id, window_id in thread_router.iter_thread_bindings():
             state = window_store.window_states.get(window_id)
             if state and state.session_id == session_id:
+                result.append((user_id, window_id, thread_id))
+        if result or not window_id_hint:
+            return result
+        # Fallback: route by window_id for hookless providers.
+        for user_id, thread_id, window_id in thread_router.iter_thread_bindings():
+            if window_id == window_id_hint:
+                logger.debug(
+                    "find_users_for_session: sid %r not in window_states, "
+                    "routing via window_id_hint %r",
+                    session_id,
+                    window_id_hint,
+                )
                 result.append((user_id, window_id, thread_id))
         return result
 

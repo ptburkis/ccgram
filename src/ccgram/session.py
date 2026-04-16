@@ -1230,11 +1230,13 @@ class SessionManager:
     def find_users_for_session(
         self,
         session_id: str,
+        *,
+        window_id_hint: str = "",
     ) -> list[tuple[int, str, int]]:
         """Delegate to session_resolver.find_users_for_session."""
         from .session_resolver import session_resolver
 
-        return session_resolver.find_users_for_session(session_id)
+        return session_resolver.find_users_for_session(session_id, window_id_hint=window_id_hint)
 
     # --- Message history (delegated to session_resolver) ---
 
