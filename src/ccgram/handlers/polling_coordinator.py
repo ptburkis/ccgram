@@ -792,6 +792,19 @@ async def _handle_dead_window_notification(
             pass
     lifecycle_strategy.mark_dead_notified(user_id, thread_id, wid)
 
+    # Also persist: retire the DB session so subsequent polls don't rediscover
+    # this dead window and re-alert after a daemon restart (in-memory
+    # is_dead_notified state doesn't survive restart).
+    try:
+        from .. import store
+        with store.connect() as _c:
+            _c.execute(
+                "UPDATE sessions SET status='retired', window_id=NULL WHERE window_id=? AND status='active'",
+                (wid,),
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
 
 # ── Main orchestration ──────────────────────────────────────────────────
 
