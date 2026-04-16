@@ -444,9 +444,13 @@ async def _handle_stop_failure(event: HookEvent, bot: Bot) -> None:
 
     # Empty/unknown error with no detail = nothing actionable for the user,
     # just noise. Log only. Only post to the topic when there's a real
-    # error string or details to show.
-    if not error and not error_details:
-        logger.info("StopFailure suppressed (empty payload): window=%s", window_id)
+    # actionable error string or details to show.
+    _NOISE_ERRORS = {"", "unknown", "error", "none", "null"}
+    if (error or "").strip().lower() in _NOISE_ERRORS and not error_details:
+        logger.info(
+            "StopFailure suppressed (no actionable detail): window=%s error=%r",
+            window_id, error,
+        )
         return
     if error:
         detail = f": {error_details}" if error_details else ""
