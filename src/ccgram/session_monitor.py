@@ -229,6 +229,10 @@ class NewMessage:
     tool_use_id: str | None = None
     role: str = "assistant"  # "user" or "assistant"
     tool_name: str | None = None  # For tool_use messages, the tool name
+    window_id: str = ""  # Originating tmux window; set for hookless providers (Codex,
+    # Gemini) where session_id in session_map differs from the DB session_id stored in
+    # window_states. find_users_for_session uses this as a fallback routing key so that
+    # Codex/Gemini responses aren't silently dropped.
 
 
 @dataclass
@@ -748,6 +752,7 @@ class SessionMonitor:
             ]
 
         if notice is not None:
+            notice.window_id = window_id
             new_messages.append(notice)
 
         for entry in with_text:
@@ -760,6 +765,7 @@ class SessionMonitor:
                     tool_use_id=entry.tool_use_id,
                     role=entry.role,
                     tool_name=entry.tool_name,
+                    window_id=window_id,
                 )
             )
             # Log transcript event to debug timeline

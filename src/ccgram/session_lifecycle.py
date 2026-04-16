@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shlex
 import shutil
 import sqlite3
@@ -70,6 +71,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+# Telegram user ID that owns the routing user_prefs rows.
+# Override via CCGRAM_DEFAULT_USER_ID env var.
+_DEFAULT_USER_ID: int = int(os.environ.get("CCGRAM_DEFAULT_USER_ID", "1219959327"))
 
 import structlog
 
@@ -303,6 +308,18 @@ async def create_session(
                 topic_id=topic_id,
                 session_id=session_id,
                 topic_title=topic_name,
+            )
+            # Write the user_prefs routing row required by
+            # session._load_state_from_db (scope='group_chat',
+            # key='<user_id>:<topic_id>', value=group_id).  Must be in the
+            # same transaction as the topic_binding write so the two stay
+            # in sync.
+            store.set_pref(
+                conn,
+                scope="group_chat",
+                scope_id="",
+                key=f"{_DEFAULT_USER_ID}:{topic_id}",
+                value=group_id,
             )
             # Step 6: promote to active.
             store.upsert_session(

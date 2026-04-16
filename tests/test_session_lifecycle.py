@@ -94,6 +94,11 @@ class TestCreateSessionHappyPath:
         assert binding.topic_id == 42
         assert binding.topic_title == "proj-x"
 
+        # user_prefs routing row must be written atomically with topic_binding.
+        with store.connect() as conn:
+            pref = store.get_pref(conn, scope="group_chat", key=f"{1219959327}:42")
+        assert pref == -1001, f"expected group_id -1001 in user_prefs, got {pref!r}"
+
     @pytest.mark.asyncio
     async def test_existing_topic_reuse_title_match(self, ccgram_test_dir, stubs):
         stubs.verify_topic.return_value = (True, "reused-topic")
