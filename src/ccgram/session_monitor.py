@@ -1171,6 +1171,12 @@ class SessionMonitor:
             # Pre-populate tracked_sessions so the first poll cycle after
             # reconciliation actually backfills from initial_offset rather
             # than the default "jump to end of file" for fresh sessions.
+            # CRITICAL: if we're already tracking this session at an offset
+            # past initial_offset, DO NOT rewind — reconcile runs on every
+            # tick and would otherwise replay the backlog forever.
+            existing = self.state.tracked_sessions.get(chosen_sid)
+            if existing and existing.last_byte_offset >= initial_offset:
+                continue
             tracked = TrackedSession(
                 session_id=chosen_sid,
                 file_path=str(chosen),
