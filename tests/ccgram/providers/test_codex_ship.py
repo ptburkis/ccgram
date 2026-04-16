@@ -96,17 +96,24 @@ def test_process_session_file_sets_window_id(tmp_path: Path) -> None:
     )
 
 
-# ── Test 3: fallback routing via window_id_hint ───────────────────────────────
+# ── Test 3: router routes correctly on ccgram session_id (no hint needed) ─────
 
 
 def test_find_users_fallback_routing() -> None:
-    """When session_id isn't in window_states, route via window_id_hint."""
+    """After the split-ids refactor, routing works on ccgram session_id directly.
+
+    Previously this test verified the window_id_hint fallback. Now that
+    register_hookless_session stores the provider UUID in provider_session_id
+    and preserves the ccgram DB session_id in session_id, the router sees the
+    correct ccgram session_id in window_states and no hint is needed.
+    """
     from ccgram.session_resolver import SessionResolver
 
     resolver = SessionResolver.__new__(SessionResolver)
 
     fake_state = MagicMock()
-    fake_state.session_id = "b235b5e8-fake"  # different from the lookup sid
+    # Now session_id holds the ccgram routing id (set by session_lifecycle)
+    fake_state.session_id = "ccgram-uuid"
 
     fake_window_store = MagicMock()
     fake_window_store.window_states = {"@412": fake_state}
@@ -119,8 +126,7 @@ def test_find_users_fallback_routing() -> None:
         patch("ccgram.session_resolver.window_store", fake_window_store),
         patch("ccgram.session_resolver.thread_router", fake_thread_router),
     ):
-        result = resolver.find_users_for_session(
-            "019d9311-fake", window_id_hint="@412"
-        )
+        # No window_id_hint needed: session_id is now the ccgram routing id
+        result = resolver.find_users_for_session("ccgram-uuid")
 
     assert result == [(42, "@412", 100)]

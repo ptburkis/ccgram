@@ -36,7 +36,11 @@ def parse_session_map(raw: dict[str, Any], prefix: str) -> dict[str, dict[str, s
     """Parse session_map.json entries matching a tmux session prefix.
 
     Also matches legacy "ccbot:" prefix keys when the current prefix is "ccgram:".
-    Returns {window_name: {"session_id": ..., "cwd": ...}} for matching entries.
+    Returns {window_name: {"session_id": ..., "provider_session_id": ..., "cwd": ...}}
+    for matching entries.
+
+    Migration: entries without provider_session_id fall back to session_id for
+    backward-compat with old session_map.json files.
     """
     result: dict[str, dict[str, str]] = {}
     legacy_prefix = _LEGACY_SESSION_PREFIX if prefix.startswith("ccgram:") else ""
@@ -51,8 +55,11 @@ def parse_session_map(raw: dict[str, Any], prefix: str) -> dict[str, dict[str, s
             continue
         session_id = info.get("session_id", "")
         if session_id:
+            # Back-compat: absent provider_session_id falls back to session_id.
+            provider_session_id = info.get("provider_session_id", "") or session_id
             result[window_name] = {
                 "session_id": session_id,
+                "provider_session_id": provider_session_id,
                 "cwd": info.get("cwd", ""),
                 "window_name": info.get("window_name", ""),
                 "transcript_path": info.get("transcript_path", ""),
@@ -396,6 +403,11 @@ class SessionMapSync:
     ) -> None:
         """Register a session for a hookless provider (Codex, Gemini).
 
+        ``session_id`` here is the PROVIDER UUID (e.g. Codex rollout id).
+        It is stored as ``provider_session_id`` for file tracking. The
+        ccgram DB session_id (set by session_lifecycle.create_session) is
+        preserved in ``state.session_id`` and must not be overwritten.
+
         Updates in-memory WindowState and schedules a debounced state save.
         Must be called from the event loop thread (not from asyncio.to_thread)
         because _schedule_save() touches asyncio timer handles.
@@ -406,7 +418,17 @@ class SessionMapSync:
         from .window_state_store import window_store
 
         state = window_store.get_window_state(window_id)
-        state.session_id = session_id
+        # Store the provider UUID for file tracking.
+        state.provider_session_id = session_id
+        # Preserve the ccgram DB session_id (routing identity). Only fall back
+        # to the provider UUID when the ccgram id is genuinely absent.
+        if not state.session_id:
+            logger.warning(
+                "register_hookless_session: ccgram session_id missing for "
+                "window %s, falling back to provider UUID",
+                window_id,
+            )
+            state.session_id = session_id
         state.cwd = cwd
         state.transcript_path = transcript_path
         state.provider_name = provider_name
@@ -464,8 +486,24 @@ class SessionMapSync:
                                 "Failed to read session_map.json for hookless write"
                             )
                     display_name = thread_router.get_display_name(window_id)
+                    # Look up the ccgram routing session_id from window state.
+                    # ``session_id`` passed in is the provider UUID; the ccgram DB
+                    # id may already be set (populated by session_lifecycle).
+                    from .window_state_store import window_store as _ws
+                    _state = _ws.window_states.get(window_id)
+                    ccgram_sid = (
+                        (_state.session_id if _state and _state.session_id else "")
+                        or session_id
+                    )
+                    if ccgram_sid == session_id and _state and not _state.session_id:
+                        logger.warning(
+                            "write_hookless_session_map: ccgram session_id missing "
+                            "for window %s, using provider UUID as fallback",
+                            window_id,
+                        )
                     session_map[window_key] = {
-                        "session_id": session_id,
+                        "session_id": ccgram_sid,       # ccgram routing id
+                        "provider_session_id": session_id,  # provider tracking id
                         "cwd": cwd,
                         "window_name": display_name,
                         "transcript_path": transcript_path,
@@ -473,8 +511,10 @@ class SessionMapSync:
                     }
                     atomic_write_json(map_file, session_map)
                     logger.info(
-                        "Registered hookless session: %s -> session_id=%s, cwd=%s",
+                        "Registered hookless session: %s -> session_id=%s, "
+                        "provider_session_id=%s, cwd=%s",
                         window_key,
+                        ccgram_sid,
                         session_id,
                         cwd,
                     )
@@ -526,6 +566,8 @@ class SessionMapSync:
         new_sid = info.get("session_id", "")
         if not new_sid:
             return False
+        # Back-compat: absent provider_session_id falls back to session_id.
+        new_provider_sid = info.get("provider_session_id", "") or new_sid
         new_cwd = info.get("cwd", "")
         new_wname = info.get("window_name", "")
         new_transcript = info.get("transcript_path", "")
@@ -535,14 +577,38 @@ class SessionMapSync:
         if mark_external and not state.external:
             state.external = True
             changed = True
-        if state.session_id != new_sid or state.cwd != new_cwd:
-            logger.info(
-                "Session map: window_id %s updated sid=%s, cwd=%s",
+
+        # Apply provider_session_id for file tracking.
+        if state.provider_session_id != new_provider_sid:
+            state.provider_session_id = new_provider_sid
+            changed = True
+
+        # Only update session_id if currently empty — don't overwrite an
+        # existing ccgram DB session_id with a provider UUID from the map.
+        if not state.session_id:
+            logger.warning(
+                "Session map: window_id %s has no ccgram session_id, "
+                "falling back to session_id from map: %s",
                 window_id,
                 new_sid,
-                new_cwd,
             )
             state.session_id = new_sid
+            changed = True
+        elif state.session_id != new_sid:
+            logger.info(
+                "Session map: window_id %s updated sid=%s",
+                window_id,
+                new_sid,
+            )
+            state.session_id = new_sid
+            changed = True
+
+        if state.cwd != new_cwd and new_cwd:
+            logger.info(
+                "Session map: window_id %s updated cwd=%s",
+                window_id,
+                new_cwd,
+            )
             state.cwd = new_cwd
             changed = True
         if new_transcript and state.transcript_path != new_transcript:

@@ -71,7 +71,8 @@ from .handlers.callback_registry import dispatch as _dispatch_callback
 from .handlers.callback_registry import load_handlers as _load_callback_handlers
 from .handlers.restore_command import restore_command
 from .handlers.resume_command import resume_command
-from .handlers.directory_browser import clear_browse_state
+from .handlers.directory_browser import clear_browse_state, clear_window_picker_state, STATE_BROWSING_DIRECTORY, STATE_SELECTING_WINDOW, STATE_KEY
+from .handlers.user_state import PENDING_THREAD_ID, PENDING_THREAD_TEXT
 from .handlers.cleanup import clear_topic_state
 from .handlers.topic_emoji import strip_emoji_prefix, update_stored_topic_name
 from .handlers.history import send_history
@@ -124,6 +125,8 @@ session_monitor: SessionMonitor | None = None
 
 # Status polling task
 _status_poll_task: asyncio.Task | None = None
+# Rebind drain task
+_rebind_drain_task: asyncio.Task | None = None
 
 
 def is_user_allowed(user_id: int | None) -> bool:
@@ -693,10 +696,9 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         len(msg.text),
     )
 
-    # Find users whose thread-bound window matches this session
-    active_users = session_manager.find_users_for_session(
-        msg.session_id, window_id_hint=msg.window_id
-    )
+    # Find users whose thread-bound window matches this session.
+    # window_id_hint removed: session_id is now always the ccgram routing id.
+    active_users = session_manager.find_users_for_session(msg.session_id)
 
     if not active_users:
         logger.info("No active users for session %s", msg.session_id)
@@ -819,6 +821,44 @@ def _global_exception_handler(
         )
     else:
         logger.error("asyncio exception handler: %s", msg)
+
+
+async def _drain_rebind_events(application: Application) -> None:
+    import json as _json
+    _events_path = Path.home() / ".ccgram" / "rebind-events.json"
+    while True:
+        await asyncio.sleep(5)
+        try:
+            if not _events_path.exists():
+                continue
+            try:
+                events = _json.loads(_events_path.read_text())
+            except Exception:
+                continue
+            if not isinstance(events, list):
+                continue
+            for ev in events:
+                try:
+                    uid = int(ev["user_id"])
+                    tid = int(ev["thread_id"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                ud = application._user_data.get(uid)
+                if ud is None:
+                    continue
+                if ud.get(STATE_KEY) in (STATE_BROWSING_DIRECTORY, STATE_SELECTING_WINDOW) and ud.get(PENDING_THREAD_ID) == tid:
+                    clear_browse_state(ud)
+                    clear_window_picker_state(ud)
+                    ud.pop(PENDING_THREAD_ID, None)
+                    ud.pop(PENDING_THREAD_TEXT, None)
+                    ud.pop(STATE_KEY, None)
+                    logger.info("rebind drain: cleared picker for user=%d thread=%d", uid, tid)
+            try:
+                _events_path.unlink()
+            except OSError:
+                pass
+        except Exception:
+            logger.debug("rebind drain error", exc_info=True)
 
 
 async def post_init(application: Application) -> None:
@@ -950,6 +990,9 @@ async def post_init(application: Application) -> None:
     _status_poll_task = asyncio.create_task(status_poll_loop(application.bot))
     _status_poll_task.add_done_callback(task_done_callback)
     logger.info("Status polling task started")
+    global _rebind_drain_task
+    _rebind_drain_task = asyncio.create_task(_drain_rebind_events(application))
+    _rebind_drain_task.add_done_callback(task_done_callback)
 
     # Start inotify session watcher (event-driven session rotation detection)
     from .session_watcher import start_session_watcher

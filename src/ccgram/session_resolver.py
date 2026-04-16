@@ -201,30 +201,26 @@ class SessionResolver:
         self,
         session_id: str,
         *,
-        window_id_hint: str = "",
+        window_id_hint: str = "",  # Deprecated no-op: see note below.
     ) -> list[tuple[int, str, int]]:
         """Find users whose thread-bound window maps to session_id.
 
-        Falls back to window_id_hint when session_id isn't in window_states —
-        needed for hookless providers (Codex/Gemini) whose internal session_id
-        differs from the ccgram DB session_id stored in window_states.
+        ``session_id`` must be the ccgram DB session_id (routing identity),
+        which is stored in ``window_states[w].session_id`` and matches
+        ``sessions.session_id`` / ``topic_bindings.session_id`` in SQLite.
+
+        ``window_id_hint`` is kept for call-site compatibility but is now a
+        no-op. NewMessage.session_id is always the ccgram routing id so the
+        direct lookup below is sufficient without any fallback.
+
+        # window_id_hint fallback removed: NewMessage.session_id is now always the
+        # ccgram DB session_id (not the provider UUID), so direct session_id lookup
+        # is sufficient. See: refactor/split-session-ids commit.
         """
         result: list[tuple[int, str, int]] = []
         for user_id, thread_id, window_id in thread_router.iter_thread_bindings():
             state = window_store.window_states.get(window_id)
             if state and state.session_id == session_id:
-                result.append((user_id, window_id, thread_id))
-        if result or not window_id_hint:
-            return result
-        # Fallback: route by window_id for hookless providers.
-        for user_id, thread_id, window_id in thread_router.iter_thread_bindings():
-            if window_id == window_id_hint:
-                logger.debug(
-                    "find_users_for_session: sid %r not in window_states, "
-                    "routing via window_id_hint %r",
-                    session_id,
-                    window_id_hint,
-                )
                 result.append((user_id, window_id, thread_id))
         return result
 

@@ -114,7 +114,7 @@ def _find_last_user_turn_offset(file_path: "Path") -> int:
 
     try:
         text = data.decode("utf-8", errors="replace")
-    except UnicodeDecodeError, ValueError:
+    except (UnicodeDecodeError, ValueError):
         return len(data)
 
     # Walk line starts so we can map back from parsed line index to byte offset
@@ -229,10 +229,9 @@ class NewMessage:
     tool_use_id: str | None = None
     role: str = "assistant"  # "user" or "assistant"
     tool_name: str | None = None  # For tool_use messages, the tool name
-    window_id: str = ""  # Originating tmux window; set for hookless providers (Codex,
-    # Gemini) where session_id in session_map differs from the DB session_id stored in
-    # window_states. find_users_for_session uses this as a fallback routing key so that
-    # Codex/Gemini responses aren't silently dropped.
+    window_id: str = ""  # Originating tmux window; used for per-window provider
+    # resolution and timeline logging. session_id is now always the ccgram DB
+    # routing id, so window_id is NOT needed as a routing fallback.
 
 
 @dataclass
@@ -290,6 +289,7 @@ class SessionMonitor:
         # Timestamp of the last successful reconcile_session_map pass.
         # Rate-limits drift healing so it doesn't run every poll cycle.
         self._last_reconcile_time: float = 0.0
+        self._last_db_reload: float = 0.0
 
     def get_last_activity(self, session_id: str) -> float | None:
         """Get monotonic timestamp of last transcript activity for a session."""
@@ -611,12 +611,23 @@ class SessionMonitor:
         file_path: Path,
         new_messages: list[NewMessage],
         window_id: str = "",
+        ccgram_session_id: str = "",
     ) -> None:
         """Process a single session file for new messages.
+
+        ``session_id`` is the provider-internal UUID used as the file-tracking
+        key (TrackedSession key, mtime dict, pending_tools). For Claude sessions
+        this equals the ccgram DB session_id. For hookless providers (Codex,
+        Gemini) it differs.
+
+        ``ccgram_session_id`` is the ccgram DB session_id used for routing
+        (NewMessage.session_id). When empty, falls back to ``session_id``.
 
         Handles tracking initialization, mtime checking, incremental reading,
         and parsing. Appends any new messages to the provided list.
         """
+        # Routing id for NewMessage: prefer ccgram_session_id when available.
+        routing_sid = ccgram_session_id or session_id
         tracked = self.state.get_session(session_id)
         provider = _resolve_provider_for_file(window_id, file_path)
 
@@ -734,7 +745,7 @@ class SessionMonitor:
                 else:
                     _elapsed = 'a gap'
                 notice = NewMessage(
-                    session_id=session_id,
+                    session_id=routing_sid,
                     text=(
                         f'🔄 Caught up after {_elapsed} — skipped {skipped} earlier'
                         f' messages, showing last {_CATCHUP_CAP}:'
@@ -758,7 +769,7 @@ class SessionMonitor:
         for entry in with_text:
             new_messages.append(
                 NewMessage(
-                    session_id=session_id,
+                    session_id=routing_sid,
                     text=entry.text,
                     is_complete=True,
                     content_type=entry.content_type,
@@ -820,49 +831,61 @@ class SessionMonitor:
         """
         new_messages: list[NewMessage] = []
 
-        # Build session_id -> window_id reverse map for per-window provider resolution
-        sid_to_wid: dict[str, str] = {}
+        # Build reverse maps for routing and file tracking.
+        # provider_session_id is the key used for file/transcript tracking.
+        # session_id (ccgram DB id) is the key used for routing (NewMessage).
+        psid_to_wid: dict[str, str] = {}   # provider_session_id -> window_id
+        psid_to_sid: dict[str, str] = {}   # provider_session_id -> ccgram session_id
         for window_id, details in current_map.items():
-            sid_to_wid[details["session_id"]] = window_id
+            psid = details.get("provider_session_id") or details["session_id"]
+            psid_to_wid[psid] = window_id
+            psid_to_sid[psid] = details["session_id"]
 
         # Separate entries with direct transcript_path from those needing scan
-        direct_sessions: list[tuple[str, Path]] = []
-        fallback_session_ids: set[str] = set()
+        direct_sessions: list[tuple[str, str, Path]] = []  # (provider_sid, ccgram_sid, path)
+        fallback_provider_ids: set[str] = set()
 
         for details in current_map.values():
-            session_id = details["session_id"]
+            psid = details.get("provider_session_id") or details["session_id"]
+            ccgram_sid = details["session_id"]
             transcript_path = details.get("transcript_path", "")
             if transcript_path:
                 path = Path(transcript_path)
                 if path.exists():
-                    direct_sessions.append((session_id, path))
+                    direct_sessions.append((psid, ccgram_sid, path))
                     continue
-            fallback_session_ids.add(session_id)
+            fallback_provider_ids.add(psid)
 
         # Primary path: read directly from transcript_path
-        for session_id, file_path in direct_sessions:
+        # Use provider_session_id as the file-tracking key; pass ccgram_session_id
+        # so NewMessage carries the routing id.
+        for provider_sid, ccgram_sid, file_path in direct_sessions:
             try:
                 await self._process_session_file(
-                    session_id,
+                    provider_sid,
                     file_path,
                     new_messages,
-                    window_id=sid_to_wid.get(session_id, ""),
+                    window_id=psid_to_wid.get(provider_sid, ""),
+                    ccgram_session_id=ccgram_sid,
                 )
             except Exception:
-                logger.exception("Error processing session %s", session_id)
+                logger.exception("Error processing session %s", provider_sid)
 
         # Fallback path: scan projects for sessions without transcript_path
-        if fallback_session_ids:
+        if fallback_provider_ids:
             sessions = await self.scan_projects()
             for session_info in sessions:
-                if session_info.session_id not in fallback_session_ids:
+                if session_info.session_id not in fallback_provider_ids:
                     continue
                 try:
                     await self._process_session_file(
                         session_info.session_id,
                         session_info.file_path,
                         new_messages,
-                        window_id=sid_to_wid.get(session_info.session_id, ""),
+                        window_id=psid_to_wid.get(session_info.session_id, ""),
+                        ccgram_session_id=psid_to_sid.get(
+                            session_info.session_id, session_info.session_id
+                        ),
                     )
                 except Exception:
                     logger.exception(
@@ -1053,7 +1076,7 @@ class SessionMonitor:
             return
         try:
             sm = json.loads(config.session_map_file.read_text())
-        except json.JSONDecodeError, OSError:
+        except (json.JSONDecodeError, OSError):
             return
 
         canonical = config.tmux_session_name or "ccgram"
@@ -1075,7 +1098,7 @@ class SessionMonitor:
         # Pull live tmux windows once for lookup
         try:
             live_windows = await tmux_manager.list_windows()
-        except OSError, _PathResolveError:
+        except _PathResolveError:
             return
         win_by_id = {w.window_id: w for w in live_windows}
 
@@ -1139,7 +1162,7 @@ class SessionMonitor:
                     if not first:
                         continue
                     d = json.loads(first)
-                except OSError, json.JSONDecodeError:
+                except (OSError, json.JSONDecodeError):
                     continue
                 # Sanity check: the first line must be a recognisable Claude
                 # transcript entry. Claude Code writes various metadata types
@@ -1203,6 +1226,49 @@ class SessionMonitor:
                     fname,
                 )
 
+    async def _reload_topic_bindings_from_db(self) -> None:
+        import sqlite3 as _sqlite3
+        from . import store as _store
+        from .thread_router import thread_router as _tr
+        reload_secs = float(os.environ.get("CCGRAM_DB_RELOAD_SECS", "60"))
+        now = time.monotonic()
+        if now - self._last_db_reload < reload_secs:
+            return
+        self._last_db_reload = now
+        try:
+            with _store.connect() as conn:
+                bindings = _store.list_topic_bindings(conn)
+                gchat_rows = _store.list_prefs(conn, "group_chat")
+                sessions = _store.list_sessions(conn)
+        except (_sqlite3.DatabaseError, FileNotFoundError):
+            return
+        gid_tid_to_uid: dict[tuple[int, int], int] = {}
+        for _scope_id, key, value in gchat_rows:
+            try:
+                uid_s, tid_s = key.split(":", 1)
+                gid_tid_to_uid[(int(value), int(tid_s))] = int(uid_s)
+            except (ValueError, TypeError):
+                continue
+        sid_to_wid: dict[str, str] = {s.session_id: s.window_id for s in sessions if s.window_id}
+        desired: dict[int, dict[int, str]] = {}
+        for b in bindings:
+            uid = gid_tid_to_uid.get((b.group_id, b.topic_id))
+            wid = sid_to_wid.get(b.session_id)
+            if uid is None or wid is None:
+                continue
+            desired.setdefault(uid, {})[b.topic_id] = wid
+        for uid, topics in desired.items():
+            for tid, wid in topics.items():
+                current = _tr.thread_bindings.get(uid, {}).get(tid)
+                if current != wid:
+                    _tr.bind_thread(uid, tid, wid)
+                    logger.info("runtime reload: topic %d -> %s (user %d)", tid, wid, uid)
+        for uid, in_mem in list(_tr.thread_bindings.items()):
+            for tid in list(in_mem.keys()):
+                if tid not in desired.get(uid, {}):
+                    _tr.unbind_thread(uid, tid)
+                    logger.info("runtime reload: dropped stale topic %d (user %d)", tid, uid)
+
     async def _monitor_loop(self) -> None:
         """Background loop for checking session updates.
 
@@ -1221,6 +1287,8 @@ class SessionMonitor:
         error_streak = 0
         while self._running:
             try:
+                # Periodically reload topic bindings from DB (rebind sync)
+                await self._reload_topic_bindings_from_db()
                 # Read hook events first (lower latency than transcript polls)
                 await self._read_hook_events()
 

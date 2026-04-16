@@ -37,7 +37,13 @@ class WindowState:
     """Persistent state for a tmux window.
 
     Attributes:
-        session_id: Associated Claude session ID (empty if not yet detected)
+        session_id: ccgram DB session_id — ROUTING identity. Matches
+            sessions.session_id and topic_bindings.session_id. For Claude
+            equals provider_session_id.
+        provider_session_id: Provider-internal session UUID for FILE TRACKING.
+            For Claude equals session_id. For hookless providers (Codex,
+            Gemini) differs — this is the UUID from the provider's own
+            session metadata (e.g. Codex rollout JSONL session_meta.id).
         cwd: Working directory for direct file path construction
         window_name: Display name of the window
         transcript_path: Direct path to JSONL transcript file (from hook payload)
@@ -49,6 +55,7 @@ class WindowState:
     """
 
     session_id: str = ""
+    provider_session_id: str = ""
     cwd: str = ""
     window_name: str = ""
     transcript_path: str = ""
@@ -63,6 +70,10 @@ class WindowState:
             "session_id": self.session_id,
             "cwd": self.cwd,
         }
+        # Only serialize provider_session_id when it differs from session_id
+        # (saves space for Claude sessions where they're always equal).
+        if self.provider_session_id and self.provider_session_id != self.session_id:
+            d["provider_session_id"] = self.provider_session_id
         if self.window_name:
             d["window_name"] = self.window_name
         if self.transcript_path:
@@ -85,8 +96,13 @@ class WindowState:
         notif = data.get("notification_mode", "summary")
         if notif in _LEGACY_NOTIFICATION_MODES:
             notif = "summary"
+        session_id = data.get("session_id", "")
+        # Back-compat: absent provider_session_id falls back to session_id
+        # (old serialized state without provider_session_id field).
+        provider_session_id = data.get("provider_session_id", "") or session_id
         return cls(
-            session_id=data.get("session_id", ""),
+            session_id=session_id,
+            provider_session_id=provider_session_id,
             cwd=data.get("cwd", ""),
             window_name=data.get("window_name", ""),
             transcript_path=data.get("transcript_path", ""),
@@ -152,6 +168,7 @@ class WindowStateStore:
         """Clear session association for a window (e.g., after /clear command)."""
         state = self.get_window_state(window_id)
         state.session_id = ""
+        state.provider_session_id = ""
         state.notification_mode = "summary"
         self._schedule_save()
         logger.info("Cleared session for window_id %s", window_id)
@@ -196,6 +213,7 @@ class WindowStateStore:
             if not new_prov.capabilities.supports_hook:
                 if state.session_id:
                     state.session_id = ""
+                    state.provider_session_id = ""
                     state.transcript_path = ""
                 self._on_hookless_provider_switch(window_id)
 
