@@ -478,6 +478,42 @@ _EVENT_DATA_EXTRACTORS: dict[str, Any] = {
 }
 
 
+def _write_pty_marker(
+    session_id: str,
+    window_id: str,
+    window_name: str,
+    cwd: str,
+    transcript_path: str,
+) -> None:
+    """Write a PTY marker file for the current agent process.
+
+    Resolves the PTY via /proc/<ppid>/fd/0.  Silently skips if not in a pty
+    context.  Never raises.
+    """
+    try:
+        ppid = os.getppid()
+        try:
+            pty = os.readlink(f"/proc/{ppid}/fd/0")
+        except OSError:
+            return
+        if not pty.startswith("/dev/pts/"):
+            return
+
+        from . import pty_markers
+        pty_markers.write_marker(
+            pty=pty,
+            window_id=window_id,
+            window_name=window_name,
+            pid=ppid,
+            provider="claude",
+            session_id=session_id,
+            transcript_path=transcript_path,
+            cwd=cwd,
+        )
+    except Exception:
+        logger.debug("_write_pty_marker failed", exc_info=True)
+
+
 def _update_session_map(
     session_window_key: str,
     session_id: str,
@@ -627,12 +663,30 @@ def _process_hook_stdin() -> None:
                 "window_name": window_name,
             },
         )
+        _write_pty_marker(session_id, window_id, window_name, cwd, transcript_path)
         return
 
     # Other events: write event only
     extractor = _EVENT_DATA_EXTRACTORS.get(event)
     data = extractor(payload) if extractor else {}
     _write_event(event, session_id, session_window_key, data)
+
+    # Look up cwd and transcript_path from session_map for non-SessionStart events.
+    _fallback_cwd = cwd
+    _fallback_transcript = transcript_path
+    if not _fallback_cwd or not _fallback_transcript:
+        try:
+            from .utils import ccgram_dir
+            import json as _json
+            _map_file = ccgram_dir() / "session_map.json"
+            if _map_file.exists():
+                _sm = _json.loads(_map_file.read_text())
+                _entry = _sm.get(session_window_key, {})
+                _fallback_cwd = _fallback_cwd or _entry.get("cwd", "")
+                _fallback_transcript = _fallback_transcript or _entry.get("transcript_path", "")
+        except Exception:
+            pass
+    _write_pty_marker(session_id, window_id, window_name, _fallback_cwd, _fallback_transcript)
 
 
 def hook_main(

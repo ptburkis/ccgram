@@ -138,6 +138,36 @@ async def _find_and_register_transcript(
         else f"{config.tmux_session_name}:{window_id}"
     )
 
+    # Check for an authoritative PTY marker first.
+    try:
+        from ..pty_markers import read_marker_for_window
+        marker = read_marker_for_window(window_id)
+        if marker and marker.get("session_id") and marker.get("transcript_path"):
+            sid = marker["session_id"]
+            tp = marker["transcript_path"]
+            cwd_m = marker.get("cwd", "") or state.cwd or ""
+            provider_m = marker.get("provider", "codex")
+            if not _is_transcript_claimed(tp, window_id):
+                if state.session_id != sid or state.transcript_path != tp:
+                    session_manager.register_hookless_session(
+                        window_id=window_id,
+                        session_id=sid,
+                        cwd=cwd_m,
+                        transcript_path=tp,
+                        provider_name=provider_m,
+                    )
+                    await asyncio.to_thread(
+                        session_manager.write_hookless_session_map,
+                        window_id=window_id,
+                        session_id=sid,
+                        cwd=cwd_m,
+                        transcript_path=tp,
+                        provider_name=provider_m,
+                    )
+                return
+    except Exception:
+        logger.debug("transcript_discovery marker shortcut failed", exc_info=True)
+
     for provider_name, provider in providers_to_try:
         max_age = 0 if pane_alive else None
         event = await asyncio.to_thread(

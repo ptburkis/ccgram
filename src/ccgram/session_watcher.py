@@ -414,6 +414,25 @@ def _find_window_for_jsonl(
     Returns (window_id, window_name, current_session_id) if found, else None.
     Runs synchronously — call via asyncio.to_thread.
     """
+    # Resolution step 0: PTY marker — authoritative if present and pid alive.
+    try:
+        from .pty_markers import list_active_markers
+        jsonl_str = str(jsonl_path)
+        for m in list_active_markers():
+            if m.get("transcript_path") == jsonl_str and m.get("window_id"):
+                pid = m.get("pid", 0)
+                if pid and Path(f"/proc/{pid}").exists():
+                    window_id = m["window_id"]
+                    window_name = m.get("window_name", "")
+                    current_sid = m.get("session_id") or None
+                    logger.info(
+                        "session watcher [pty-marker]: matched %s -> %s (%s)",
+                        jsonl_path.name, window_id, window_name,
+                    )
+                    return window_id, window_name, current_sid
+    except Exception:
+        pass
+
     import json
     from .config import config
 

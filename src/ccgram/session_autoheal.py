@@ -266,6 +266,25 @@ async def _maybe_refresh_session_map_inner(window_id: str) -> bool:
 
     state = window_store.get_window_state(window_id)
 
+    # Prefer PTY marker if available — it is authoritative.
+    try:
+        from .pty_markers import read_marker_for_window
+        marker = read_marker_for_window(window_id)
+        if marker and marker.get("session_id") and marker.get("transcript_path"):
+            new_sid = marker["session_id"]
+            new_transcript = marker["transcript_path"]
+            if new_sid != state.session_id:
+                ok = await apply_session_update(
+                    window_id=window_id,
+                    old_sid=state.session_id or "",
+                    new_sid=new_sid,
+                    new_transcript=new_transcript,
+                    source="pty-marker",
+                )
+                return ok
+    except Exception:
+        logger.debug("auto-heal marker shortcut failed for %s", window_id, exc_info=True)
+
     # Only act on Claude windows — hookless providers manage themselves.
     if state.provider_name and state.provider_name != "claude":
         return False

@@ -999,6 +999,11 @@ async def post_init(application: Application) -> None:
 
     await start_session_watcher()
 
+    # Start PTY marker scanner (Codex process scanner + stale marker sweeper)
+    from .session_marker_scanner import start_session_marker_scanner
+
+    await start_session_marker_scanner()
+
 
 async def _send_shutdown_notification(application: Application) -> None:
     """Send a shutdown notification to the General topic if a group is configured."""
