@@ -444,3 +444,102 @@ class TestClassifyWaitMessage:
     )
     def test_classifies_wait_messages(self, message: str, expected: str | None) -> None:
         assert classify_wait_message(message) == expected
+
+
+
+class TestRebuildFromEntries:
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        claude_task_state.reset()
+        yield
+        claude_task_state.reset()
+
+    def test_stale_marker_skips_rebuild(self) -> None:
+        """When PTY marker shows a different session_id, rebuild is skipped."""
+        import unittest.mock as mock
+        entries = [
+            _assistant_tool_use(
+                'tool-1',
+                'TaskCreate',
+                {'subject': 'Stale task', 'description': '', 'activeForm': ''},
+            ),
+            _user_tool_result(
+                'tool-1',
+                tool_use_result={'task': {'id': '1', 'subject': 'Stale task'}},
+            ),
+        ]
+        with mock.patch('ccgram.pty_markers.read_marker_for_window') as mock_marker:
+            mock_marker.return_value = {'session_id': 'live-session-99'}
+            result = claude_task_state.rebuild_from_entries('@stale', 'old-session-1', entries)
+
+        assert result is False
+        snapshot = get_claude_task_snapshot('@stale')
+        assert snapshot is None
+
+    def test_matching_marker_proceeds(self) -> None:
+        """When PTY marker session_id matches, rebuild proceeds normally."""
+        import unittest.mock as mock
+        entries = [
+            _assistant_tool_use(
+                'tool-1',
+                'TaskCreate',
+                {'subject': 'Current task', 'description': '', 'activeForm': ''},
+            ),
+            _user_tool_result(
+                'tool-1',
+                tool_use_result={'task': {'id': '1', 'subject': 'Current task'}},
+            ),
+        ]
+        with mock.patch('ccgram.pty_markers.read_marker_for_window') as mock_marker:
+            mock_marker.return_value = {'session_id': 'live-session-1'}
+            result = claude_task_state.rebuild_from_entries('@match', 'live-session-1', entries)
+
+        assert result is True
+        snapshot = get_claude_task_snapshot('@match')
+        assert snapshot is not None
+        assert snapshot.total_count == 1
+
+    def test_none_marker_proceeds(self) -> None:
+        """When PTY marker returns None, rebuild proceeds normally."""
+        import unittest.mock as mock
+        entries = [
+            _assistant_tool_use(
+                'tool-1',
+                'TaskCreate',
+                {'subject': 'No marker task', 'description': '', 'activeForm': ''},
+            ),
+            _user_tool_result(
+                'tool-1',
+                tool_use_result={'task': {'id': '1', 'subject': 'No marker task'}},
+            ),
+        ]
+        with mock.patch('ccgram.pty_markers.read_marker_for_window') as mock_marker:
+            mock_marker.return_value = None
+            result = claude_task_state.rebuild_from_entries('@nomarker', 'some-session', entries)
+
+        assert result is True
+        snapshot = get_claude_task_snapshot('@nomarker')
+        assert snapshot is not None
+        assert snapshot.total_count == 1
+
+    def test_import_exception_proceeds(self) -> None:
+        """When pty_markers import raises, exception is swallowed and rebuild proceeds."""
+        import unittest.mock as mock
+        entries = [
+            _assistant_tool_use(
+                'tool-1',
+                'TaskCreate',
+                {'subject': 'Exception task', 'description': '', 'activeForm': ''},
+            ),
+            _user_tool_result(
+                'tool-1',
+                tool_use_result={'task': {'id': '1', 'subject': 'Exception task'}},
+            ),
+        ]
+        with mock.patch('ccgram.pty_markers.read_marker_for_window', side_effect=RuntimeError('boom')):
+            result = claude_task_state.rebuild_from_entries('@exc', 'exc-session', entries)
+
+        assert result is True
+        snapshot = get_claude_task_snapshot('@exc')
+        assert snapshot is not None
+        assert snapshot.total_count == 1

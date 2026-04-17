@@ -8,10 +8,13 @@ headers and optimistic task completion hints.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 from .topic_state_registry import topic_state
+
+logger = logging.getLogger(__name__)
 
 _WAITING_INPUT = "Waiting for input"
 _PLAN_APPROVAL = "Plan approval needed"
@@ -232,6 +235,21 @@ class ClaudeTaskStateStore:
         session_id: str,
         entries: list[dict[str, Any]],
     ) -> bool:
+        if window_id and session_id:
+            try:
+                from . import pty_markers
+                marker = pty_markers.read_marker_for_window(window_id)
+                if marker is not None:
+                    live_sid = marker.get("session_id", "")
+                    if live_sid and live_sid != session_id:
+                        logger.debug(
+                            "rebuild_from_entries: skipping stale replay "
+                            "(window=%s, replay_sid=%s, live_sid=%s)",
+                            window_id, session_id, live_sid,
+                        )
+                        return False
+            except Exception:
+                pass
         self._replace_window(window_id, session_id)
         return self.apply_entries(window_id, session_id, entries)
 
