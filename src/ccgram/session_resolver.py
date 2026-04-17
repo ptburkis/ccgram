@@ -205,23 +205,44 @@ class SessionResolver:
     ) -> list[tuple[int, str, int]]:
         """Find users whose thread-bound window maps to session_id.
 
-        DB-direct: queries topic_bindings table directly instead of iterating
-        the in-memory window_states dict (which may be empty at startup).
+        Marker-oracle routing: resolves session_id -> window_id via PTY marker,
+        then queries topic_bindings by window_id. Insulates from session_id churn
+        caused by Task subagent spawns reusing window_ids.
         """
-        import sqlite3
-        from pathlib import Path
+        import sqlite3 as _sqlite3
+        from pathlib import Path as _Path
         result: list[tuple[int, str, int]] = []
         try:
-            db_path = Path.home() / ".ccgram" / "state.db"
+            resolved_window_id: str | None = None
+            try:
+                from .pty_markers import find_marker_by_session_id
+                marker = find_marker_by_session_id(session_id)
+                if marker:
+                    resolved_window_id = marker.get('window_id')
+            except Exception:
+                pass
+
+            if not resolved_window_id and window_id_hint:
+                resolved_window_id = window_id_hint
+
+            db_path = _Path.home() / ".ccgram" / "state.db"
             if not db_path.exists():
                 return result
-            conn = sqlite3.connect(str(db_path))
+            conn = _sqlite3.connect(str(db_path))
             try:
-                rows = conn.execute(
-                    "SELECT user_id, window_id, topic_id FROM topic_bindings "
-                    "WHERE session_id=? AND user_id IS NOT NULL AND window_id IS NOT NULL",
-                    (session_id,),
-                ).fetchall()
+                if resolved_window_id:
+                    rows = conn.execute(
+                        "SELECT user_id, window_id, topic_id FROM topic_bindings "
+                        "WHERE window_id=? AND user_id IS NOT NULL AND window_id IS NOT NULL",
+                        (resolved_window_id,),
+                    ).fetchall()
+                else:
+                    # Fallback: query by session_id (old behaviour)
+                    rows = conn.execute(
+                        "SELECT user_id, window_id, topic_id FROM topic_bindings "
+                        "WHERE session_id=? AND user_id IS NOT NULL AND window_id IS NOT NULL",
+                        (session_id,),
+                    ).fetchall()
                 result = [(r[0], r[1], r[2]) for r in rows]
             finally:
                 conn.close()

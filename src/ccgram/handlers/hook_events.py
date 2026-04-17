@@ -469,6 +469,36 @@ async def _handle_session_end(event: HookEvent, bot: Bot) -> None:
     from .polling_strategies import clear_seen_status
     from .topic_emoji import update_topic_emoji
 
+    data = event.data
+
+    # Skip subagent SessionEnd — only primary sessions should clear state.
+    if data.get('parent_session_id'):
+        logger.debug('SessionEnd: skipping subagent event (parent_session_id present)')
+        return
+
+    transcript_path = data.get('transcript_path', '')
+    if transcript_path and 'agents/' in transcript_path:
+        logger.debug(
+            'SessionEnd: skipping subagent event (transcript in agents/ dir: %s)',
+            transcript_path,
+        )
+        return
+
+    try:
+        from ..pty_markers import read_marker_for_window as _read_marker
+        window_id_for_check = event.window_key.rsplit(':', 1)[-1] if ':' in event.window_key else event.window_key
+        marker = _read_marker(window_id_for_check)
+        if marker and marker.get('session_id') and marker['session_id'] != event.session_id:
+            logger.debug(
+                'SessionEnd: PTY marker session_id %s != event session_id %s '
+                '— subagent exit, skipping',
+                marker['session_id'],
+                event.session_id,
+            )
+            return
+    except Exception:
+        pass  # marker unavailable — allow through
+
     users = _resolve_users_for_window_key(event.window_key)
     if not users:
         return
@@ -555,7 +585,6 @@ async def _handle_session_start(event: HookEvent, bot: Bot) -> None:  # noqa: C9
         connect,
         get_binding_for_session,
         upsert_session,
-        upsert_topic_binding,
     )
     from ..window_state_store import window_store
     from .message_sender import rate_limit_send_message
@@ -579,6 +608,40 @@ async def _handle_session_start(event: HookEvent, bot: Bot) -> None:  # noqa: C9
         return
 
     new_sid = event.session_id
+
+    # Guard A — skip if window_id is not live in tmux
+    try:
+        import subprocess as _subprocess
+        result = _subprocess.run(
+            ['tmux', 'list-windows', '-t', 'ccgram', '-F', '#{window_id}'],
+            capture_output=True, text=True, timeout=2
+        )
+        live_windows = result.stdout.strip().splitlines()
+        if window_id not in live_windows:
+            logger.debug(
+                'SessionStart: window %s not live in tmux — skipping stale hook',
+                window_id,
+            )
+            return
+    except Exception:
+        pass  # tmux unavailable — allow through
+
+    # Guard B — skip if PTY marker session_id doesn't match event.session_id
+    try:
+        from ..pty_markers import read_marker_for_window as read_marker
+        marker = read_marker(window_id)
+        if marker and marker.get('session_id') and marker['session_id'] != new_sid:
+            logger.debug(
+                'SessionStart: PTY marker session_id %s != event session_id %s '
+                'for window %s — subagent mismatch, skipping',
+                marker['session_id'],
+                new_sid,
+                window_id,
+            )
+            return
+    except Exception:
+        pass  # marker unavailable — allow through
+
     cwd = event.data.get("cwd", "")
     new_transcript = event.data.get("transcript_path", "")
 
@@ -627,16 +690,9 @@ async def _handle_session_start(event: HookEvent, bot: Bot) -> None:  # noqa: C9
                 status="active",
                 window_id=window_id,
             )
-            if old_sid:
-                old_binding = get_binding_for_session(conn, old_sid)
-                if old_binding is not None:
-                    upsert_topic_binding(
-                        conn,
-                        group_id=old_binding.group_id,
-                        topic_id=old_binding.topic_id,
-                        session_id=new_sid,
-                        topic_title=old_binding.topic_title,
-                    )
+            # Routing is done via PTY marker window_id lookup, not session_id.
+            # Rebinding on session rotation caused churn from Task subagent spawns.
+            pass
     except (OSError, RuntimeError, ValueError):
         logger.debug(
             "SessionStart: DB update failed for %s", window_id, exc_info=True

@@ -124,6 +124,11 @@ def read_marker_for_session(session_id: str) -> dict | None:
     return None
 
 
+def find_marker_by_session_id(session_id: str) -> dict | None:
+    """Alias for read_marker_for_session — returns the marker dict for session_id, or None."""
+    return read_marker_for_session(session_id)
+
+
 def list_active_markers() -> list[dict]:
     """Return all marker dicts (no liveness filtering)."""
     result: list[dict] = []

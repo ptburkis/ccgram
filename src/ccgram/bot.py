@@ -908,6 +908,24 @@ async def post_init(application: Application) -> None:
     )
     logger.info("session_lifecycle configured")
 
+    # Pre-populate thread_router from DB before adopt_unbound_windows runs.
+    # Without this, every window appears unbound on startup, causing alert floods.
+    try:
+        from .store import connect as _connect, list_topic_bindings as _list_bindings
+        from .thread_router import thread_router as _tr
+        _bound_count = 0
+        with _connect() as _conn:
+            _bindings = _list_bindings(_conn)
+            for _b in _bindings:
+                if _b.user_id and _b.window_id:
+                    _tr.bind_thread(_b.user_id, _b.topic_id, _b.window_id, _b.topic_title or '')
+                    _bound_count += 1
+                if _b.user_id and _b.group_id:
+                    _tr.set_group_chat_id(_b.user_id, _b.topic_id, _b.group_id)
+        logger.info('post_init: pre-populated %d thread bindings from DB', _bound_count)
+    except Exception:
+        logger.debug('post_init: DB pre-populate failed', exc_info=True)
+
     await _adopt_unbound_windows(application.bot)
 
     # Warn if Claude Code hooks are not installed (provider-aware, non-blocking)

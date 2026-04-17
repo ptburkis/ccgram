@@ -749,6 +749,20 @@ def upsert_session(
     """
     now = int(time.time())
     c_at = created_at if created_at is not None else now
+    # Don't steal window_id from an incumbent active session. Task subagent
+    # SessionStart hooks arrive with a window_id that already belongs to the primary session.
+    effective_window_id = window_id
+    if window_id is not None and status == "active":
+        row = conn.execute(
+            "SELECT session_id FROM sessions WHERE window_id=? AND status='active' AND session_id != ?",
+            (window_id, session_id),
+        ).fetchone()
+        if row:
+            logger.debug(
+                "upsert_session: window_id %s already owned by active session %s — not stealing",
+                window_id, row[0],
+            )
+            effective_window_id = None
     conn.execute(
         """
         INSERT INTO sessions (session_id, cwd, agent, mode, status, window_id,
@@ -762,7 +776,7 @@ def upsert_session(
             window_id  = excluded.window_id,
             updated_at = excluded.updated_at
         """,
-        (session_id, cwd, agent, mode, status, window_id, c_at, now),
+        (session_id, cwd, agent, mode, status, effective_window_id, c_at, now),
     )
 
 

@@ -112,6 +112,10 @@ def run_bot() -> None:
     setup_logging(log_level)
 
     # --- Auto-detect tmux session (before config import) ---
+    # IMPORTANT: Set TMUX_SESSION_NAME=ccgram in the environment before starting.
+    # Without it, auto-detection may pick up web-terminal mirror sessions
+    # (grouped tmux sessions) instead of the canonical ccgram session,
+    # causing wrong window routing.
     explicit_session = os.environ.get("TMUX_SESSION_NAME")
     auto_detected = False
 

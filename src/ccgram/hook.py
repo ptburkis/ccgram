@@ -434,6 +434,8 @@ def _extract_session_end_data(payload: dict[str, Any]) -> dict[str, Any]:
     """Extract data from a SessionEnd hook payload."""
     return {
         "reason": payload.get("reason", ""),
+        "transcript_path": payload.get("transcript_path", ""),
+        "parent_session_id": payload.get("parent_session_id", ""),
     }
 
 
@@ -487,16 +489,58 @@ def _write_pty_marker(
 ) -> None:
     """Write a PTY marker file for the current agent process.
 
-    Resolves the PTY via /proc/<ppid>/fd/0.  Silently skips if not in a pty
+    Resolves the PTY by first querying tmux for the pane tty and pid, then
+    falling back to /proc/<ppid>/fd/0.  Silently skips if not in a pty
     context.  Never raises.
     """
     try:
-        ppid = os.getppid()
+        pty: str | None = None
+        pid: int | None = None
+
+        # 1. Try tmux lookup first
         try:
-            pty = os.readlink(f"/proc/{ppid}/fd/0")
-        except OSError:
+            result = subprocess.run(
+                ["tmux", "display-message", "-t", f"ccgram:{window_id}", "-p", "#{pane_tty}/#{pane_pid}"],
+                timeout=2,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0 and "/" in result.stdout:
+                tty_part, _, pid_part = result.stdout.strip().rpartition("/")
+                if tty_part.startswith("/dev/pts/"):
+                    pty = tty_part
+                    try:
+                        pid = int(pid_part)
+                    except ValueError:
+                        pid = None
+        except Exception:
+            pass
+
+        # 2. Fall back to /proc/<ppid>/fd/0
+        if not pty:
+            try:
+                ppid = os.getppid()
+                candidate = os.readlink(f"/proc/{ppid}/fd/0")
+                if candidate.startswith("/dev/pts/"):
+                    pty = candidate
+                    pid = ppid
+            except OSError:
+                pass
+
+        # 3. No valid pty found
+        if not pty:
             return
-        if not pty.startswith("/dev/pts/"):
+
+        # Subagent filter: only write marker if this process is the direct child
+        # of the tmux pane process (primary claude). Task subagents have a
+        # different parent and must not overwrite the primary session's marker.
+        if pid is not None and os.getppid() != pid:
+            logger.debug(
+                '_write_pty_marker: skipping — os.getppid()=%d != pane_pid=%d '
+                '(subagent hook)',
+                os.getppid(),
+                pid,
+            )
             return
 
         from . import pty_markers
@@ -504,7 +548,7 @@ def _write_pty_marker(
             pty=pty,
             window_id=window_id,
             window_name=window_name,
-            pid=ppid,
+            pid=pid,
             provider="claude",
             session_id=session_id,
             transcript_path=transcript_path,
