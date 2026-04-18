@@ -229,7 +229,9 @@ async def handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
 
     await _auto_detect_provider(event.window_id)
 
-    topic_name = event.window_name or Path(event.cwd).name or event.window_id
+    import re as _re
+    raw_topic = event.window_name or Path(event.cwd).name or event.window_id
+    topic_name = raw_topic if not _re.match(r'^@\d+$', raw_topic) else (Path(event.cwd).name or event.window_id)
     seen_chats = collect_target_chats(event.window_id)
     if not seen_chats:
         return

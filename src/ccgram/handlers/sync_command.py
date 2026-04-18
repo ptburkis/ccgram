@@ -240,6 +240,57 @@ async def _close_ghost_topics(bot: Bot, issues: list[AuditIssue]) -> int:
     return closed_count
 
 
+_BARE_WINDOW_ID_RE = re.compile(r"^@\d+$")
+
+
+def _is_bare_window_id(name: str) -> bool:
+    """Return True if *name* is a bare tmux window ID like ``@7`` or ``@422``."""
+    return bool(_BARE_WINDOW_ID_RE.match(name))
+
+
+async def _resolve_adopt_name(window_id: str, ws) -> str:
+    """Find a meaningful (non-bare @N) name for a window being adopted."""
+    try:
+        if ws.window_name and not _is_bare_window_id(ws.window_name):
+            return ws.window_name
+    except Exception:
+        pass
+    try:
+        from ..pty_markers import read_marker_for_window as _read_marker
+        marker = await asyncio.to_thread(_read_marker, window_id)
+        if marker:
+            n = marker.get('window_name', '')
+            if n and not _is_bare_window_id(n):
+                return n
+    except Exception:
+        pass
+    try:
+        tw = await tmux_manager.find_window_by_id(window_id)
+        if tw and tw.window_name and not _is_bare_window_id(tw.window_name):
+            return tw.window_name
+    except Exception:
+        pass
+    try:
+        from .. import store as _store
+        with _store.connect() as conn:
+            row = conn.execute(
+                'SELECT topic_title FROM topic_bindings WHERE window_id = ? LIMIT 1',
+                (window_id,),
+            ).fetchone()
+        if row and row['topic_title'] and not _is_bare_window_id(row['topic_title']):
+            return row['topic_title']
+    except Exception:
+        pass
+    try:
+        from pathlib import Path as _Path
+        basename = _Path(ws.cwd).name if ws.cwd else ''
+        if basename and not _is_bare_window_id(basename):
+            return basename
+    except Exception:
+        pass
+    return window_id
+
+
 async def _adopt_orphaned_windows(bot: Bot, issues: list[AuditIssue]) -> None:
     """Create Telegram topics for unbound tmux windows."""
     from .topic_orchestration import handle_new_window as _handle_new_window
@@ -253,7 +304,16 @@ async def _adopt_orphaned_windows(bot: Bot, issues: list[AuditIssue]) -> None:
             continue
         window_id = match.group(1)
         ws = session_manager.get_window_state(window_id)
-        name = ws.window_name or thread_router.get_display_name(window_id)
+        raw_name = ws.window_name or thread_router.get_display_name(window_id)
+        if _is_bare_window_id(raw_name):
+            name = await _resolve_adopt_name(window_id, ws)
+            if name != raw_name:
+                logger.info(
+                    'adopt: resolved name %r for %s (was bare id %r)',
+                    name, window_id, raw_name,
+                )
+        else:
+            name = raw_name
         event = NewWindowEvent(
             window_id=window_id,
             session_id=ws.session_id,
