@@ -273,17 +273,23 @@ async def _apply_subagent_suffix(bot: Bot, users: list, *, add: bool) -> None:
     """Add/remove ⚡ suffix; preserves 🐚 if present. Order: 🐚 then ⚡."""
     from telegram.error import TelegramError as _TelegramError
 
+    from .topic_emoji import _topic_names as _topic_names_cache
+
     for user_id, thread_id, window_id in users:
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
         if not chat_id:
             continue
+        # Prefer the topic_emoji cache (reflects actual Telegram title) over
+        # the DB-stored display_name which may be stale after a restart.
+        cached = _topic_names_cache.get((chat_id, thread_id))
         display = thread_router.get_display_name(window_id) or ""
-        clean = _strip_both_suffixes(display)
-        has_bg = _BG_WORK_SUFFIX_EXT.strip() in display
+        live = cached if cached is not None else display
+        clean = _strip_both_suffixes(live)
+        has_bg = _BG_WORK_SUFFIX_EXT.strip() in live
         new_name = f"{clean}{_BG_WORK_SUFFIX_EXT}" if has_bg else clean
         if add:
             new_name = f"{new_name}{_SUBAGENT_SUFFIX}"
-        if new_name == display:
+        if new_name == live:
             continue
         try:
             await bot.edit_forum_topic(

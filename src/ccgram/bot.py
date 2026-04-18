@@ -77,6 +77,7 @@ from .handlers.cleanup import clear_topic_state
 from .handlers.topic_emoji import strip_emoji_prefix, update_stored_topic_name
 from .handlers.history import send_history
 from .handlers.sessions_dashboard import sessions_command
+from .handlers.startup_cleanup import cleanup_stale_topic_suffixes as _cleanup_stale_topic_suffixes
 from .handlers.sync_command import sync_command
 from .handlers.upgrade import upgrade_command
 from .handlers.interactive_ui import (
@@ -925,6 +926,9 @@ async def post_init(application: Application) -> None:
         logger.info('post_init: pre-populated %d thread bindings from DB', _bound_count)
     except Exception:
         logger.debug('post_init: DB pre-populate failed', exc_info=True)
+
+    # One-shot: strip stale ⚡/🐚/[H/M/L] suffixes baked into topic names.
+    await _cleanup_stale_topic_suffixes(application.bot)
 
     await _adopt_unbound_windows(application.bot)
 

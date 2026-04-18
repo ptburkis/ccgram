@@ -426,38 +426,25 @@ async def _check_effort_suffix(
     thread_id: int | None,
     pane_text: str,
 ) -> None:
-    """Check the effort level and update topic name suffix if needed.
+    """Track detected effort level but do NOT apply it to the topic name.
 
-    Called from update_status_message on every poll cycle. Uses debouncing
-    to avoid rapid renames. If the indicator disappears (detected is None),
-    the suffix is left in place (sticky badge).
+    Effort level belongs in the status bubble only — not the topic title.
+    This function tracks what Claude Code reports (for status display) and
+    strips any stale effort suffix that somehow crept into the topic name.
     """
     if thread_id is None:
         return
 
     detected = _parse_effort(pane_text)
-
-    # Sticky: if the indicator is gone, do nothing — keep the last suffix.
-    if detected is None:
-        return
-
-    now = time.monotonic()
-    prev_detected = _effort_detected.get(window_id, "UNSET")
-
-    if prev_detected == "UNSET" or prev_detected != detected:
+    # Track for status bubble consumption; never add to topic name.
+    if detected is not None:
         _effort_detected[window_id] = detected
-        _effort_changed_at[window_id] = now
-        return  # start debounce timer
 
-    changed_at = _effort_changed_at.get(window_id, now)
-    if (now - changed_at) < _EFFORT_DEBOUNCE_SECS:
-        return  # still debouncing
-
+    # If a suffix was previously applied (e.g. from before this fix), strip it.
     currently_shown = _effort_shown.get(window_id)
-    if detected == currently_shown:
-        return  # already reflected — no-op
-
-    await _apply_effort_suffix(bot, window_id, thread_id, detected)
+    if currently_shown:
+        await _apply_effort_suffix(bot, window_id, thread_id, None)
+        _effort_shown[window_id] = None
 
 
 # ── Typing throttle ─────────────────────────────────────────────────────
