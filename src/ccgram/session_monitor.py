@@ -26,7 +26,7 @@ from telegram.error import TelegramError
 
 from .claude_task_state import claude_task_state
 from .config import config
-from .monitor_state import MonitorState, TrackedSession
+from .monitor_state import MonitorState, TrackedSession, _PERIODIC_SAVE_INTERVAL
 from .providers import (
     detect_provider_from_transcript_path,
     get_provider_for_window,
@@ -290,6 +290,7 @@ class SessionMonitor:
         # Rate-limits drift healing so it doesn't run every poll cycle.
         self._last_reconcile_time: float = 0.0
         self._last_db_reload: float = 0.0
+        self._last_periodic_save: float = 0.0
 
     def get_last_activity(self, session_id: str) -> float | None:
         """Get monotonic timestamp of last transcript activity for a session."""
@@ -1385,6 +1386,10 @@ class SessionMonitor:
                 continue
 
             error_streak = 0
+            now = time.monotonic()
+            if now - self._last_periodic_save >= _PERIODIC_SAVE_INTERVAL:
+                self.state.save()
+                self._last_periodic_save = now
             await asyncio.sleep(self.poll_interval)
 
         logger.info("Session monitor stopped")

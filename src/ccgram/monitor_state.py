@@ -14,6 +14,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+_PERIODIC_SAVE_INTERVAL = 30  # seconds
+
 logger = structlog.get_logger()
 
 
@@ -65,7 +67,7 @@ class MonitorState:
         try:
             with store.connect() as conn:
                 prefs = store.list_prefs(conn, "monitor")
-        except sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError:
+        except (sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError):
             prefs = []
         if prefs:
             # Rehydrate tracked_sessions from (scope_id=session_id, key, value)
@@ -76,7 +78,9 @@ class MonitorState:
                 sid: TrackedSession(
                     session_id=sid,
                     file_path=d.get("file_path", ""),
-                    last_byte_offset=d.get("last_byte_offset", 0),
+                    # Coerce to int: values come as JSON-decoded numbers but
+                    # may arrive as float or str if stored by older code.
+                    last_byte_offset=int(d.get("last_byte_offset", 0)),
                 )
                 for sid, d in tmp.items()
                 if d.get("file_path")
@@ -123,6 +127,33 @@ class MonitorState:
             self._dirty = False
         except OSError:
             logger.exception("Failed to save state file")
+
+        # Also persist to DB so restarts can reload without relying on JSON.
+        from . import store
+
+        try:
+            with store.connect() as conn:
+                for session in self.tracked_sessions.values():
+                    store.set_pref(
+                        conn,
+                        "monitor",
+                        "last_byte_offset",
+                        session.last_byte_offset,
+                        scope_id=session.session_id,
+                    )
+                    store.set_pref(
+                        conn,
+                        "monitor",
+                        "file_path",
+                        session.file_path,
+                        scope_id=session.session_id,
+                    )
+            logger.debug(
+                "Saved %d tracked session offsets to DB",
+                len(self.tracked_sessions),
+            )
+        except (sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError) as exc:
+            logger.warning("Failed to save monitor state to DB: %s", exc)
 
     def get_session(self, session_id: str) -> TrackedSession | None:
         """Get tracked session by ID."""
