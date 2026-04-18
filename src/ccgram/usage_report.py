@@ -31,12 +31,7 @@ _MAX_SESSIONS = 5
 
 _SCRAPE_SCRIPT = os.environ.get(
     "CCGRAM_SCRAPE_USAGE_SCRIPT",
-    os.path.normpath(
-        os.path.join(
-            os.path.dirname(__file__),
-            "../../../../ccgram-dashboard/scrape-usage.sh",
-        )
-    ),
+    "/home/peter/ccgram-dashboard/scrape-usage.sh",
 )
 _SCRAPE_CLAUDE_WINDOW = os.environ.get("CCGRAM_SCRAPE_CLAUDE_WINDOW", "usage-scraper")
 _SCRAPE_CODEX_WINDOW = os.environ.get("CCGRAM_SCRAPE_CODEX_WINDOW", "usage-scraper-codex")
@@ -188,6 +183,8 @@ async def generate_usage_report() -> str:
 
     Returns a Telegram-ready string showing rate limits + context per session.
     """
+    scraper_task = asyncio.create_task(_get_claude_rate_limits())
+
     with store.connect() as conn:
         active_sessions = store.list_sessions(conn, status="active")
         bindings = store.list_topic_bindings(conn)
@@ -205,9 +202,6 @@ async def generate_usage_report() -> str:
             codex_sessions.append(session)
         else:
             claude_sessions.append(session)
-
-    # Start scraper concurrently alongside transcript reads
-    scraper_task = asyncio.create_task(_get_claude_rate_limits())
 
     async def _collect(session):
         state = session_manager.get_window_state(session.window_id)
@@ -233,8 +227,8 @@ async def generate_usage_report() -> str:
 
     results = await asyncio.gather(*[_collect(s) for s in claude_sessions])
     rate_limits = await scraper_task
-    session_data = [r for r in results if r is not None]
 
+    session_data = [r for r in results if r is not None]
     session_data.sort(key=lambda x: x["pct"], reverse=True)
 
     shown = []
@@ -244,62 +238,61 @@ async def generate_usage_report() -> str:
 
     lines: list[str] = []
 
-    # Section 1: Claude rate limits from scraper
-    session_rl = rate_limits.get("session")
-    weekly_rl = rate_limits.get("weekAll")
-    if session_rl or weekly_rl:
+    # Section 1 — Rate Limits
+    if rate_limits.get("session") or rate_limits.get("weekAll"):
         lines.append("📊 Rate Limits")
-        if session_rl:
-            pct = session_rl.get("percent", "?")
-            resets = session_rl.get("resets", "")
-            lines.append(f"  5h: {pct}% used" + (f" (resets {resets})" if resets else ""))
-        if weekly_rl:
-            pct = weekly_rl.get("percent", "?")
-            resets = weekly_rl.get("resets", "")
-            lines.append(f"  Weekly: {pct}% used" + (f" (resets {resets})" if resets else ""))
+        if "session" in rate_limits:
+            s = rate_limits["session"]
+            resets = f" (resets {s['resets']})" if s.get("resets") else ""
+            lines.append(f"  5h: {s['percent']}% used{resets}")
+        if "weekAll" in rate_limits:
+            w = rate_limits["weekAll"]
+            resets = f" (resets {w['resets']})" if w.get("resets") else ""
+            lines.append(f"  Weekly: {w['percent']}% used{resets}")
 
-    # Section 2: Codex
-    codex_from_scraper = rate_limits.get("codex")
+    # Section 2 — Codex
     if codex_sessions:
         for session in codex_sessions:
             window_id = session.window_id
             if not window_id:
                 continue
             display_name = _session_display_name(
-                window_id, binding_by_session.get(session.session_id)
+                window_id,
+                binding_by_session.get(session.session_id),
             )
-            if lines:
-                lines.append("")
+            lines.append("")
             lines.append(f"🟢 Codex ({display_name})")
-            if codex_from_scraper:
-                remaining = codex_from_scraper.get("remaining")
-                resets = codex_from_scraper.get("resets", "")
-                suffix = f" (resets {resets})" if resets else ""
-                lines.append(f"  {remaining}% left{suffix}" if remaining is not None else "  (limit hit)")
+            codex_rl = rate_limits.get("codex")
+            if codex_rl is not None:
+                if codex_rl.get("remaining") is not None:
+                    resets = f" (resets {codex_rl['resets']})" if codex_rl.get("resets") else ""
+                    lines.append(f"  {codex_rl['remaining']}% left{resets}")
+                else:
+                    lines.append("  (limit hit)")
             else:
                 codex_info = await _get_codex_info(window_id)
                 if codex_info.get("5h_pct_left"):
-                    rst = f" (resets {codex_info['5h_resets']})" if codex_info.get("5h_resets") else ""
-                    lines.append(f"  5h: {codex_info['5h_pct_left']}% left{rst}")
+                    resets = f" (resets {codex_info['5h_resets']})" if codex_info.get("5h_resets") else ""
+                    lines.append(f"  5h: {codex_info['5h_pct_left']}% left{resets}")
                 if codex_info.get("weekly_pct_left"):
-                    rst = f" (resets {codex_info['weekly_resets']})" if codex_info.get("weekly_resets") else ""
-                    lines.append(f"  Weekly: {codex_info['weekly_pct_left']}% left{rst}")
+                    resets = f" (resets {codex_info['weekly_resets']})" if codex_info.get("weekly_resets") else ""
+                    lines.append(f"  Weekly: {codex_info['weekly_pct_left']}% left{resets}")
                 if codex_info.get("context_pct_left"):
                     lines.append(f"  Context: {codex_info['context_pct_left']}% left")
                 if not any(k in codex_info for k in ("5h_pct_left", "weekly_pct_left", "context_pct_left")):
                     lines.append("  (no rate-limit data in pane)")
-    elif codex_from_scraper:
-        remaining = codex_from_scraper.get("remaining")
-        resets = codex_from_scraper.get("resets", "")
-        suffix = f" (resets {resets})" if resets else ""
-        if lines:
-            lines.append("")
-        lines.append("🟢 Codex")
-        lines.append(f"  {remaining}% left{suffix}" if remaining is not None else "  (limit hit)")
-
-    # Section 3: Context per session
-    if lines:
+    elif "codex" in rate_limits:
         lines.append("")
+        lines.append("🟢 Codex")
+        codex_rl = rate_limits["codex"]
+        if codex_rl.get("remaining") is not None:
+            resets = f" (resets {codex_rl['resets']})" if codex_rl.get("resets") else ""
+            lines.append(f"  {codex_rl['remaining']}% left{resets}")
+        else:
+            lines.append("  (limit hit)")
+
+    # Section 3 — Context
+    lines.append("")
     lines.append("📋 Context (top sessions)")
     if shown:
         for item in shown:
@@ -320,4 +313,6 @@ async def generate_usage_report() -> str:
     else:
         lines.append("  No active Claude sessions with usage data.")
 
-    return "\n".join(lines) if lines else "📊 Claude Usage\n\nNo data available."
+    if not lines:
+        return "📊 Claude Usage\n\nNo data available."
+    return "\n".join(lines)
