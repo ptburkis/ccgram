@@ -612,6 +612,49 @@ def _find_status_line_anywhere(lines: list[str], scan_start: int) -> int | None:
     return None
 
 
+# ── Inline tool-call activity detection ────────────────────────────────────────────
+# Claude Code v2+ shows tool invocations inline in pane content (above chrome):
+#   ⏵ Agent / ⏵ Bash(cmd) / ⏵ Read(/path) / ⏵ Edit(/path) / …
+# Block-element progress bars and quarter-circle spinners also indicate activity.
+
+# U+23F5 BLACK MEDIUM RIGHT-POINTING TRIANGLE — tool-call prefix in CC v2+
+_INLINE_TOOL_RE = re.compile(
+    r"^\s*\u23f5\s*("
+    r"Agent|Bash|Read|Edit|Write|Grep|Glob|WebSearch|WebFetch"
+    r"|MultiEdit|NotebookEdit|TodoRead|TodoWrite|Task|Skill"
+    r")\b",
+    re.IGNORECASE,
+)
+_BLOCK_SPINNER_RE = re.compile(r"[\u2580-\u259f]{3,}")  # ▘▝▜▛… progress bars
+_QUARTER_CIRCLE_RE = re.compile(r"[◐◑◒◓]")             # quarter-circle spinners
+_INLINE_TOOL_SCAN_LINES = 15
+
+
+def detect_inline_tool_activity(lines: list[str]) -> str | None:
+    """Detect Claude Code v2+ inline tool-call activity in pane content.
+
+    Scans the last _INLINE_TOOL_SCAN_LINES non-chrome lines for:
+      - ⏵ <ToolName> prefixed lines (active tool invocation)
+      - Block-element progress bars (▝▜…) from running subagents
+      - Quarter-circle spinners (◐◑◒◓)
+
+    Returns the tool name or 'running' when active, None when idle.
+    Chrome is stripped first to avoid matching ⏵⏵ bypass permissions…
+    in the status bar footer.
+    """
+    content_lines = strip_pane_chrome(lines)
+    tail = content_lines[-_INLINE_TOOL_SCAN_LINES:] if content_lines else []
+    for line in tail:
+        m = _INLINE_TOOL_RE.search(line)
+        if m:
+            return m.group(1)
+        if _BLOCK_SPINNER_RE.search(line):
+            return "running"
+        if _QUARTER_CIRCLE_RE.search(line):
+            return "running"
+    return None
+
+
 # ── Status display formatting ──────────────────────────────────────────
 
 # Keyword → (emoji, short verb) mapping for status display in Telegram.

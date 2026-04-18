@@ -371,6 +371,20 @@ class TerminalStatusStrategy:
             ws.last_pyte_result = result
             return result
 
+        # Inline tool activity: ⏵ Agent/Bash/Read/Edit/… in pane content.
+        # Status bar takes priority above; this catches activity when the bar
+        # appears idle but CC v2+ inline indicators prove a tool is running.
+        from ..terminal_parser import detect_inline_tool_activity
+        inline_tool = detect_inline_tool_activity(buf.display)
+        if inline_tool:
+            result = StatusUpdate(
+                raw_text=inline_tool,
+                display_label=format_status_display(inline_tool),
+            )
+            ws.last_pane_hash = content_hash
+            ws.last_pyte_result = result
+            return result
+
         ws.last_pane_hash = content_hash
         ws.last_pyte_result = None
         return None
