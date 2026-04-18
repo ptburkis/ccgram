@@ -32,23 +32,20 @@ async def cleanup_stale_topic_suffixes(bot: Bot) -> None:
             continue
         display = thread_router.get_display_name(window_id) or ""
         clean = _strip_both_suffixes(display)
-        if clean == display:
-            continue
+        # Always fetch the LIVE Telegram title — the stored display name
+        # may be clean even when Telegram still has stale suffixes.
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
         if not chat_id:
             continue
-        # Fetch the actual current Telegram title to avoid a no-op rename
-        # (which generates a visible notification even when nothing changed).
         current_title = await _fetch_live_topic_title(chat_id, thread_id)
-        if current_title is not None and current_title == clean:
-            logger.debug(
-                "startup_cleanup: %s already clean on Telegram, skipping rename",
-                window_id,
-            )
-            session_manager.set_display_name(window_id, clean)
-            _eff_shown[window_id] = None
-            _bg_shown[window_id] = False
-            continue
+        if current_title is not None:
+            clean_live = _strip_both_suffixes(current_title)
+            if current_title == clean_live:
+                continue  # Telegram title is already clean
+            clean = clean_live  # Use the live title's base name
+        elif clean == display:
+            continue  # Can't check live, stored name is clean, skip
+        # (chat_id and live title already fetched above)
         try:
             await bot.edit_forum_topic(
                 chat_id=chat_id,
