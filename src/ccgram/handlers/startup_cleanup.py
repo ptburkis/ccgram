@@ -7,9 +7,11 @@ thread_bindings are pre-populated from DB and before adopt_unbound_windows.
 """
 from __future__ import annotations
 
+import asyncio
+
 import structlog
 from telegram import Bot
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError
 
 from ..session import session_manager
 from ..thread_router import thread_router
@@ -60,6 +62,25 @@ async def cleanup_stale_topic_suffixes(bot: Bot) -> None:
             logger.debug(
                 "startup_cleanup: %s %r -> %r", window_id, display, clean
             )
+        except RetryAfter as ra:
+            logger.debug(
+                'startup_cleanup: flood control for %s, sleeping %ds',
+                window_id,
+                ra.retry_after + 1,
+            )
+            await asyncio.sleep(ra.retry_after + 1)
+            try:
+                await bot.edit_forum_topic(
+                    chat_id=chat_id,
+                    message_thread_id=thread_id,
+                    name=clean,
+                )
+                session_manager.set_display_name(window_id, clean)
+                _eff_shown[window_id] = None
+                _bg_shown[window_id] = False
+                cleaned += 1
+            except TelegramError:
+                logger.debug('startup_cleanup: retry failed for %s', window_id)
         except TelegramError as exc:
             logger.debug("startup_cleanup: failed for %s: %s", window_id, exc)
     logger.info("Startup: cleaned stale suffixes from %d topic(s)", cleaned)
