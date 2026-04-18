@@ -908,6 +908,10 @@ def _format_claude_task_status(window_id: str, base_text: str | None) -> str | N
         lines.append(header)
 
     if snapshot is not None:
+        # If every task is done and none are open, the checklist has no
+        # actionable value — skip rendering it to avoid cluttering the bubble.
+        if snapshot.done_count == snapshot.total_count and snapshot.open_count == 0:
+            return base_text
         lines.append(
             f"{snapshot.total_count} tasks ({snapshot.done_count} done, {snapshot.open_count} open)"
         )
@@ -1001,10 +1005,9 @@ async def _process_status_clear_task(bot: Bot, user_id: int, task: MessageTask) 
     """Delete or re-render a status message after a clear request."""
     thread_id = task.thread_id or 0
     window_id = task.window_id or ""
-    status_text = _format_claude_task_status(window_id, None)
-    if status_text and window_id:
-        await _do_send_status_message(bot, user_id, thread_id, window_id, status_text)
-        return
+    # When the original intent is a clear (task.text is None/empty), skip task
+    # snapshot rendering entirely — a stale completed task list should not
+    # prevent the status bubble from being cleared.
     await _do_clear_status_message(bot, user_id, thread_id)
 
 
