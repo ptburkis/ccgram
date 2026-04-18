@@ -478,6 +478,15 @@ async def _handle_stop_failure(event: HookEvent, bot: Bot) -> None:
         logger.info("Hook StopFailure suppressed (intentional stop): window=%s", window_id)
         return
 
+    notif_mode = session_manager.get_notification_mode(window_id)
+    if notif_mode != "all":
+        logger.debug(
+            "StopFailure suppressed (summary mode): window=%s error=%s",
+            window_id,
+            event.data.get("error", ""),
+        )
+        return
+
     error = event.data.get("error", "")
     error_details = event.data.get("error_details", "")
     error_norm = (error or "").strip().lower()
