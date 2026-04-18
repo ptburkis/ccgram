@@ -10,6 +10,7 @@ Key function: dispatch_hook_event().
 
 import json
 import os
+import re
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -37,6 +38,14 @@ _ROTATION_NOTICES_ENABLED = os.environ.get("CCGRAM_ROTATION_NOTICES", "0").strip
 # File-based IPC: dashboard writes intentional-stop markers here before pkill.
 # Format: { "<window_id>": <epoch_float> }  — value is the "suppress until" time.
 _INTENTIONAL_STOP_FILE = Path.home() / ".ccgram" / "intentional-stops.json"
+
+# Error types that are always suppressed — transient, Claude Code retries automatically.
+_SUPPRESSED_ERRORS = {"rate_limit", "rate-limit", "ratelimit"}
+
+# Debounce for StopFailure: one message per (window_id, error_type) per N seconds.
+_STOP_FAILURE_DEBOUNCE_SECS = 300.0
+# (window_id, error_type) -> last-sent monotonic timestamp
+_stop_failure_last: dict[tuple[str, str], float] = {}
 
 _WINDOW_KEY_PARTS = 2
 
@@ -425,6 +434,36 @@ def _is_intentional_stop(window_id: str) -> bool:
         return False
 
 
+def _format_error_details(raw: str) -> str:
+    """Extract a human-readable message from raw error_details and truncate to 200 chars."""
+    if not raw:
+        return ""
+    # Try to parse JSON directly, or find first {...} block in the string.
+    parsed = None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group())
+            except (ValueError, TypeError):
+                pass
+    if parsed and isinstance(parsed, dict):
+        error_obj = parsed.get("error")
+        if isinstance(error_obj, dict) and "message" in error_obj:
+            result = str(error_obj["message"])
+        elif "message" in parsed:
+            result = str(parsed["message"])
+        else:
+            result = raw
+    else:
+        result = raw
+    if len(result) > 200:
+        result = result[:200] + "..."
+    return result
+
+
 async def _handle_stop_failure(event: HookEvent, bot: Bot) -> None:
     """Handle a StopFailure event — alert on unexpected agent termination."""
     from .message_sender import rate_limit_send_message
@@ -441,6 +480,8 @@ async def _handle_stop_failure(event: HookEvent, bot: Bot) -> None:
 
     error = event.data.get("error", "")
     error_details = event.data.get("error_details", "")
+    error_norm = (error or "").strip().lower()
+
     logger.warning(
         "Hook StopFailure: window_key=%s, error=%s, details=%s",
         event.window_key,
@@ -448,21 +489,39 @@ async def _handle_stop_failure(event: HookEvent, bot: Bot) -> None:
         error_details,
     )
 
+    # Suppress transient errors that Claude Code retries automatically.
+    if error_norm in _SUPPRESSED_ERRORS:
+        logger.info(
+            "StopFailure suppressed (transient error): window=%s error=%r",
+            window_id, error,
+        )
+        return
+
     # Empty/unknown error with no detail = nothing actionable for the user,
     # just noise. Log only. Only post to the topic when there's a real
     # actionable error string or details to show.
     _NOISE_ERRORS = {"", "unknown", "error", "none", "null"}
-    if (error or "").strip().lower() in _NOISE_ERRORS and not error_details:
+    if error_norm in _NOISE_ERRORS and not error_details:
         logger.info(
             "StopFailure suppressed (no actionable detail): window=%s error=%r",
             window_id, error,
         )
         return
+    debounce_key = (window_id, error_norm or '_detail_only_')
+    now = time.monotonic()
+    last_sent = _stop_failure_last.get(debounce_key, 0.0)
+    if now - last_sent < _STOP_FAILURE_DEBOUNCE_SECS:
+        logger.info('StopFailure suppressed (debounce %ds): window=%s error=%r', _STOP_FAILURE_DEBOUNCE_SECS, window_id, error)
+        return
+    _stop_failure_last[debounce_key] = now
+
     if error:
-        detail = f": {error_details}" if error_details else ""
-        text = f"\u26a0 API error \u2014 {error}{detail}"
+        detail_text = _format_error_details(error_details)
+        detail = f': {detail_text}' if detail_text else ''
+        text = f'\u26a0 API error \u2014 {error}{detail}'
     else:
-        text = f"\u26a0 Agent terminated: {error_details}"
+        text = f'\u26a0 Agent terminated: {_format_error_details(error_details)}'
+
 
     for user_id, thread_id, _window_id in users:
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
