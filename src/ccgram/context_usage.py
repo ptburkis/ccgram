@@ -32,7 +32,7 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
 
 FLUSH_THRESHOLD: float = 0.65    # Send memory flush prompt at 65%
 COMPACT_THRESHOLD: float = 0.75  # Send /compact at 75%
-COOLDOWN_SECS: float = 300.0     # Minimum gap between successive actions
+COOLDOWN_SECS: float = 1800.0     # Minimum gap between successive actions
 CHECK_INTERVAL_SECS: float = 30.0  # Minimum gap between transcript reads
 
 # ── Transcript tail read size ─────────────────────────────────────────────
