@@ -74,6 +74,11 @@ _BACKOFF_MAX = 30.0
 _LoopError = (TelegramError, OSError, RuntimeError, ValueError)
 
 
+# ── Sync-check interval ──────────────────────────────────────────────────
+
+_SYNC_CHECK_INTERVAL = 300.0  # 5 minutes
+_last_sync_check: float = 0.0
+
 # ── Background-work topic indicator ─────────────────────────────────────
 #
 # Parses Claude Code's status bar for "N local agent(s)" / "N task(s)"
@@ -1039,6 +1044,81 @@ async def _clear_stale_bg_indicators(bot: Bot) -> None:
     # effort_shown is preserved as-is (sticky)
 
 
+# ── Periodic sync-check ────────────────────────────────────────────────────
+
+
+async def _run_periodic_sync_check(bot: Bot) -> None:
+    """Run sync-check and auto-fix any drift. Runs every _SYNC_CHECK_INTERVAL seconds."""
+    try:
+        from ..sync_check import run_sync_check
+
+        report = await asyncio.to_thread(run_sync_check, False)
+        drifted = [item for item in report.items if item.drifted]
+        if not drifted:
+            return  # All clean
+
+        logger.warning(
+            "sync_check: %d/%d topics drifted",
+            len(drifted),
+            len(report.items),
+        )
+        for item in drifted:
+            logger.warning(
+                "sync_check drift: %s tid=%d tg=%r correct=%r bolt=%s/%s shell=%s/%s effort=%s",
+                item.window_id,
+                item.topic_id,
+                item.telegram_title,
+                item.correct_name,
+                item.has_bolt,
+                item.should_bolt,
+                item.has_shell,
+                item.should_shell,
+                item.has_effort,
+            )
+
+        # Auto-fix
+        fixed = 0
+        for item in drifted:
+            correct_title = item.correct_name
+            if item.should_shell:
+                correct_title += " \U0001f41a"  # 🐚
+            if item.should_bolt:
+                correct_title += " \u26a1"      # ⚡
+
+            user_id = next(
+                (
+                    uid
+                    for uid, tid, wid in thread_router.iter_thread_bindings()
+                    if wid == item.window_id
+                ),
+                0,
+            )
+            chat_id = thread_router.resolve_chat_id(user_id, item.topic_id)
+            if not chat_id:
+                continue
+
+            try:
+                await bot.edit_forum_topic(
+                    chat_id=chat_id,
+                    message_thread_id=item.topic_id,
+                    name=correct_title,
+                )
+                fixed += 1
+                logger.info(
+                    "sync_check.periodic_fixed: %s %r -> %r",
+                    item.window_id,
+                    item.telegram_title,
+                    correct_title,
+                )
+            except Exception as exc:
+                logger.debug("sync_check fix failed: %s %s", item.window_id, exc)
+
+        if fixed:
+            logger.info("sync_check: auto-fixed %d drifted topic(s)", fixed)
+    except Exception:
+        logger.debug("periodic sync_check failed", exc_info=True)
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────
 
 
@@ -1115,6 +1195,13 @@ async def status_poll_loop(bot: Bot) -> None:
                     )
 
             await run_lifecycle_tasks(bot, all_windows)
+
+            # Periodic sync-check (every _SYNC_CHECK_INTERVAL seconds)
+            now = time.monotonic()
+            global _last_sync_check
+            if now - _last_sync_check >= _SYNC_CHECK_INTERVAL:
+                _last_sync_check = now
+                await _run_periodic_sync_check(bot)
 
         except _LoopError:
             logger.exception("Status poll loop error")

@@ -256,3 +256,55 @@ def doctor_cmd(fix: bool) -> None:
     from .doctor_cmd import doctor_main
 
     doctor_main(fix=fix)
+
+
+# --- sync-check command ----------------------------------------------------
+
+
+@cli.command("sync-check")
+@click.option("--fix", is_flag=True, help="Auto-fix drifted topics.")
+@click.option("--json", "json_output", is_flag=True, help="JSON output.")
+def sync_check_cmd(fix: bool, json_output: bool) -> None:
+    """Compare Telegram topic state vs actual state and report drift."""
+    from .sync_check import run_sync_check
+
+    report = run_sync_check(fix=fix)
+
+    if json_output:
+        import json
+        import dataclasses
+
+        def _item_to_dict(it):
+            d = dataclasses.asdict(it)
+            d["drifted"] = it.drifted
+            return d
+
+        print(
+            json.dumps(
+                {
+                    "total": report.total,
+                    "drifted": report.drifted_count,
+                    "items": [_item_to_dict(it) for it in report.items],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    # Human-readable table
+    header = (
+        f"{'Window':<8} {'Telegram Title':<30} {'Correct':<22} "
+        f"{'⚡ TG/Act':<12} {'🐚 TG/Act':<12} Match"
+    )
+    print(header)
+    print("-" * 90)
+    for it in report.items:
+        bolt_col = f"{'yes' if it.has_bolt else 'no'}/{'yes' if it.should_bolt else 'no'}"
+        shell_col = f"{'yes' if it.has_shell else 'no'}/{'yes' if it.should_shell else 'no'}"
+        status = "DRIFT" if it.drifted else "OK"
+        tg = it.telegram_title[:28] + ".." if len(it.telegram_title) > 30 else it.telegram_title
+        cn = it.correct_name[:20] + ".." if len(it.correct_name) > 22 else it.correct_name
+        print(
+            f"{it.window_id:<8} {tg:<30} {cn:<22} {bolt_col:<12} {shell_col:<12} {status}"
+        )
+    print(f"\n{report.drifted_count} drifted / {report.total} total")
