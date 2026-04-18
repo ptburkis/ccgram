@@ -628,6 +628,9 @@ _INLINE_TOOL_RE = re.compile(
 _BLOCK_SPINNER_RE = re.compile(r"[\u2580-\u259f]{3,}")  # ▘▝▜▛… progress bars
 _QUARTER_CIRCLE_RE = re.compile(r"[◐◑◒◓]")             # quarter-circle spinners
 _INLINE_TOOL_SCAN_LINES = 15
+# Matches model identifier banner lines that contain block chars but are NOT spinners.
+# Examples: "Opus 4.6 (1M context)", "Sonnet 4.5", "Haiku 3.5"
+_BANNER_MODEL_RE = re.compile(r"\b(Opus|Sonnet|Haiku)\s+\d+\.\d+")
 
 
 def detect_inline_tool_activity(lines: list[str]) -> str | None:
@@ -649,6 +652,16 @@ def detect_inline_tool_activity(lines: list[str]) -> str | None:
         if m:
             return m.group(1)
         if _BLOCK_SPINNER_RE.search(line):
+            # Exclude Claude Code ASCII banner lines (static, not a real spinner).
+            # The banner appears after /compact or session start and persists:
+            #   ▐▛███▜▌   Claude Code v2.1.104
+            #  ▝▜█████▛▘  Opus 4.6 (1M context) · Claude Max
+            if "Claude Code" in line or "Claude Max" in line or "context)" in line:
+                continue
+            # Also skip lines that are clearly model identifier banner lines
+            # (e.g. "Opus 4.6", "Sonnet 4.5", "Haiku 3.5" with version numbers)
+            if _BANNER_MODEL_RE.search(line):
+                continue
             return "running"
         if _QUARTER_CIRCLE_RE.search(line):
             return "running"
