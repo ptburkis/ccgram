@@ -184,6 +184,36 @@ class Config:
             len(self.allowed_users),
             self.tmux_session_name,
         )
+        self._init_context_compaction()
+
+    def _init_context_compaction(self) -> None:
+        self.context_compact_enabled: bool = os.getenv(
+            "CCGRAM_CONTEXT_COMPACT_ENABLED", "1"
+        ).lower() not in ("0", "false", "no")
+        try:
+            self.context_flush_pct: float = float(
+                os.getenv("CCGRAM_CONTEXT_FLUSH_PCT", "65")
+            ) / 100.0
+        except ValueError:
+            self.context_flush_pct = 0.65
+        try:
+            self.context_compact_pct: float = float(
+                os.getenv("CCGRAM_CONTEXT_COMPACT_PCT", "75")
+            ) / 100.0
+        except ValueError:
+            self.context_compact_pct = 0.75
+        try:
+            self.context_cooldown_secs: float = float(
+                os.getenv("CCGRAM_CONTEXT_COOLDOWN", "300")
+            )
+        except ValueError:
+            self.context_cooldown_secs = 300.0
+        try:
+            self.context_check_interval_secs: float = float(
+                os.getenv("CCGRAM_CONTEXT_CHECK_INTERVAL", "30")
+            )
+        except ValueError:
+            self.context_check_interval_secs = 30.0
 
     def _init_messaging(self) -> None:
         self.msg_auto_spawn: bool = os.getenv("CCGRAM_MSG_AUTO_SPAWN", "").lower() in (

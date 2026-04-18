@@ -796,6 +796,73 @@ async def _handle_dead_window_notification(
 # ── Main orchestration ──────────────────────────────────────────────────
 
 
+async def _check_context_compaction(
+    bot: Bot,
+    user_id: int,
+    window_id: str,
+    thread_id: int,
+) -> None:
+    """Proactively flush memory or compact context when usage is high.
+
+    Called from status_poll_loop when the agent appears idle. Checks the
+    transcript tail for context usage and sends a memory flush prompt or
+    /compact command when thresholds are crossed.
+    """
+    from ..config import config as _cfg
+    if not _cfg.context_compact_enabled:
+        return
+
+    from ..context_usage import (
+        MEMORY_FLUSH_PROMPT,
+        context_usage_tracker,
+        get_latest_usage,
+    )
+    from ..tmux_manager import send_to_window
+
+    tracker = context_usage_tracker
+
+    if not tracker.should_check(window_id):
+        return
+
+    if tracker.is_in_cooldown(window_id):
+        return
+
+    if _check_transcript_activity(window_id):
+        return
+
+    state = session_manager.get_window_state(window_id)
+    transcript_path = state.transcript_path if state else ""
+    if not transcript_path:
+        return
+
+    try:
+        usage, model = await asyncio.to_thread(get_latest_usage, transcript_path)
+    except Exception:
+        return
+
+    tracker.record_check(window_id, None, model)
+
+    action = tracker.determine_action(usage, model, window_id)
+    if not action:
+        return
+
+    logger.info(
+        "context_compaction.trigger",
+        window_id=window_id,
+        action=action,
+        model=model,
+    )
+
+    if action == "flush":
+        success, _ = await send_to_window(window_id, MEMORY_FLUSH_PROMPT)
+        if success:
+            tracker.record_flush(window_id)
+    elif action == "compact":
+        success, _ = await send_to_window(window_id, "/compact")
+        if success:
+            tracker.record_compact(window_id)
+
+
 async def update_status_message(
     bot: Bot,
     user_id: int,
@@ -1029,6 +1096,12 @@ async def status_poll_loop(bot: Bot) -> None:
                         thread_id=thread_id,
                         _window=w,
                     )
+                    # Proactive context compaction — only when idle
+                    if not _check_transcript_activity(wid):
+                        try:
+                            await _check_context_compaction(bot, user_id, wid, thread_id)
+                        except Exception:
+                            pass
                     await _scan_window_panes(bot, user_id, wid, thread_id)
                     await _maybe_check_passive_shell(bot, user_id, wid, thread_id)
                 except (TelegramError, OSError) as e:
