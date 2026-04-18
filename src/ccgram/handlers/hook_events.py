@@ -251,6 +251,10 @@ def _strip_both_suffixes(name: str) -> str:
 # Track active subagents per window: window_id -> {subagent_id -> name}
 _active_subagents: dict[str, dict[str, str]] = {}
 
+# Debounce for subagent suffix renames: window_id -> (has_suffix, monotonic_time)
+_subagent_suffix_last: dict[str, tuple[bool, float]] = {}
+_SUBAGENT_SUFFIX_DEBOUNCE = 10.0  # seconds
+
 _MAX_DISPLAYED_NAMES = 3
 
 
@@ -285,10 +289,6 @@ async def _apply_subagent_suffix(bot: Bot, users: list, *, add: bool) -> None:
     from .topic_emoji import _topic_names as _topic_names_cache
 
     for user_id, thread_id, window_id in users:
-        # Suppress suffix churn for summary-mode windows
-        notif_mode = session_manager.get_notification_mode(window_id)
-        if notif_mode != "all":
-            continue
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
         if not chat_id:
             continue
@@ -304,6 +304,11 @@ async def _apply_subagent_suffix(bot: Bot, users: list, *, add: bool) -> None:
             new_name = f"{new_name}{_SUBAGENT_SUFFIX}"
         if new_name == live:
             continue
+        now = time.monotonic()
+        last = _subagent_suffix_last.get(window_id)
+        if last is not None and last[0] == add and (now - last[1]) < _SUBAGENT_SUFFIX_DEBOUNCE:
+            continue
+        _subagent_suffix_last[window_id] = (add, now)
         try:
             await bot.edit_forum_topic(
                 chat_id=chat_id,
