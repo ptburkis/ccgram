@@ -1338,90 +1338,12 @@ async def usage_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> 
     user = update.effective_user
     if not user or not is_user_allowed(user.id) or not update.message:
         return
-
-    import subprocess as _sp
-
+    from .usage_report import generate_usage_report
     try:
-        result = _sp.run(
-            [
-                "/home/peter/ccgram-dashboard/scrape-usage.sh",
-                "usage-scraper",
-                "usage-scraper-codex",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            await safe_reply(update.message, "⚠️ Could not fetch usage data.")
-            return
-
-        import json as _json
-
-        data = _json.loads(result.stdout.strip())
+        report = await generate_usage_report()
+        await safe_reply(update.message, report)
     except Exception as e:
-        await safe_reply(update.message, f"⚠️ Usage scrape failed: {e}")
-        return
-
-    from datetime import datetime, timedelta, timezone
-
-    # Calculate weekly pace (Thursday 11:00 UTC reset)
-    now = datetime.now(timezone.utc)
-    days_since = (now.weekday() - 3) % 7
-    if days_since == 0 and now.hour < 11:
-        days_since = 7
-    last_reset = (now - timedelta(days=days_since)).replace(
-        hour=11, minute=0, second=0, microsecond=0
-    )
-    elapsed = now - last_reset
-    expected_pct = (elapsed / timedelta(days=7)) * 100
-
-    lines = []
-
-    # Session
-    s = data.get("session", {})
-    if s:
-        lines.append(f"⏱ Session: {s['percent']}% · resets {s.get('resets', '?')}")
-
-    # Weekly all models + pace
-    w = data.get("weekAll", {})
-    if w:
-        pct = w["percent"]
-        diff = pct - expected_pct
-        if diff < -2:
-            pace = f"▼ {abs(diff):.0f}% under"
-        elif diff > 2:
-            pace = f"▲ {diff:.0f}% over"
-        else:
-            pace = "≈ on pace"
-        lines.append(f"📊 Weekly: {pct}% · {pace} · resets {w.get('resets', '?')}")
-
-    # Weekly Sonnet
-    ws = data.get("weekSonnet", {})
-    if ws:
-        pct = ws["percent"]
-        diff = pct - expected_pct
-        if diff < -2:
-            pace = f"▼ {abs(diff):.0f}% under"
-        elif diff > 2:
-            pace = f"▲ {diff:.0f}% over"
-        else:
-            pace = "≈ on pace"
-        lines.append(f"🔵 Sonnet: {pct}% · {pace} · resets {ws.get('resets', '?')}")
-
-    # Codex
-    cx = data.get("codex", {})
-    if cx:
-        parts = [f"🟢 Codex: {cx['percent']}% used · {cx.get('remaining', '?')}% left"]
-        if cx.get("resets"):
-            parts.append(f"resets {cx['resets']}")
-        lines.append(" · ".join(parts))
-
-    if not lines:
-        await safe_reply(update.message, "⚠️ No usage data available.")
-        return
-
-    await safe_reply(update.message, "\n".join(lines))
+        await safe_reply(update.message, f"⚠️ Usage report failed: {e}")
 
 
 async def effort_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
