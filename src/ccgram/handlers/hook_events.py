@@ -285,6 +285,10 @@ async def _apply_subagent_suffix(bot: Bot, users: list, *, add: bool) -> None:
     from .topic_emoji import _topic_names as _topic_names_cache
 
     for user_id, thread_id, window_id in users:
+        # Suppress suffix churn for summary-mode windows
+        notif_mode = session_manager.get_notification_mode(window_id)
+        if notif_mode != "all":
+            continue
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
         if not chat_id:
             continue
