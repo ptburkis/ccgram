@@ -652,14 +652,15 @@ def detect_inline_tool_activity(lines: list[str]) -> str | None:
         if m:
             return m.group(1)
         if _BLOCK_SPINNER_RE.search(line):
-            # Exclude Claude Code ASCII banner lines (static, not a real spinner).
-            # The banner appears after /compact or session start and persists:
-            #   ▐▛███▜▌   Claude Code v2.1.104
-            #  ▝▜█████▛▘  Opus 4.6 (1M context) · Claude Max
-            if "Claude Code" in line or "Claude Max" in line or "context)" in line:
+            # Exclude static UI elements containing block chars:
+            # - Claude Code banner, model lines
+            # - Codex /status progress bars (contain box-drawing │ and "limit"/"left")
+            # - Any line with box-drawing characters (UI frames)
+            if any(x in line for x in (
+                "Claude Code", "Claude Max", "context)",
+                "│", "limit", "left", "resets", "used",
+            )):
                 continue
-            # Also skip lines that are clearly model identifier banner lines
-            # (e.g. "Opus 4.6", "Sonnet 4.5", "Haiku 3.5" with version numbers)
             if _BANNER_MODEL_RE.search(line):
                 continue
             return "running"

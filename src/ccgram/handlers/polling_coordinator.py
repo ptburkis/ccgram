@@ -1076,7 +1076,9 @@ async def _run_periodic_sync_check(bot: Bot) -> None:
                 item.has_effort,
             )
 
-        # Auto-fix
+        # Auto-fix DISABLED — log only, fix via 'ccgram sync-check --fix'
+        # Automatic rename causes notification spam when fighting false positives.
+        return
         fixed = 0
         for item in drifted:
             correct_title = item.correct_name
