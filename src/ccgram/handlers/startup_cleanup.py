@@ -47,6 +47,13 @@ async def cleanup_stale_topic_suffixes(bot: Bot) -> None:
             continue  # Can't check live, stored name is clean, skip
         # (chat_id and live title already fetched above)
         try:
+            from ..telegram_audit import log_action as _audit
+            _audit(
+                "edit_forum_topic", chat_id, thread_id,
+                window_id=window_id,
+                payload={"new_name": clean, "old_name": current_title or display},
+                reason="startup_cleanup",
+            )
             await bot.edit_forum_topic(
                 chat_id=chat_id,
                 message_thread_id=thread_id,

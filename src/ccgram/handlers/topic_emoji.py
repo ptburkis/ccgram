@@ -148,9 +148,17 @@ async def _edit_topic_name(
     *,
     state_token: tuple[str, str, bool] | None = None,
     state: str = "",
+    window_id: str = "",
 ) -> None:
     """Apply a topic name update with shared Telegram error handling."""
     try:
+        from ..telegram_audit import log_action as _audit
+        _audit(
+            "edit_forum_topic", chat_id, thread_id,
+            window_id=window_id,
+            payload={"new_name": new_name},
+            reason=f"topic_emoji_{state}" if state else "topic_emoji_sync",
+        )
         await bot.edit_forum_topic(
             chat_id=chat_id,
             message_thread_id=thread_id,
@@ -239,6 +247,8 @@ async def sync_topic_name(
         approval_mode=approval_mode,
         rc_active=rc_active,
     )
+    from ..thread_router import thread_router as _tr_sync
+    _wid_sync = _tr_sync.get_window_for_chat_thread(chat_id, thread_id) or ""
     await _edit_topic_name(
         bot,
         chat_id,
@@ -247,6 +257,7 @@ async def sync_topic_name(
         new_name,
         state_token=state_token,
         state=state,
+        window_id=_wid_sync,
     )
 
 
@@ -325,6 +336,8 @@ async def update_topic_emoji(
         approval_mode=approval_mode,
         rc_active=rc_active,
     )
+    from ..thread_router import thread_router as _tr_upd
+    _wid_upd = _tr_upd.get_window_for_chat_thread(chat_id, thread_id) or ""
     await _edit_topic_name(
         bot,
         chat_id,
@@ -333,6 +346,7 @@ async def update_topic_emoji(
         new_name,
         state_token=state_token,
         state=state,
+        window_id=_wid_upd,
     )
 
 

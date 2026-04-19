@@ -308,3 +308,67 @@ def sync_check_cmd(fix: bool, json_output: bool) -> None:
             f"{it.window_id:<8} {tg:<30} {cn:<22} {bolt_col:<12} {shell_col:<12} {status}"
         )
     print(f"\n{report.drifted_count} drifted / {report.total} total")
+
+
+# --- audit command ------------------------------------------------------------
+
+
+@cli.command("audit")
+@click.option("--last", default=50, type=int, help="Show last N entries (default: 50).")
+@click.option("--action", default="", help="Filter by action type.")
+@click.option("--window", default="", help="Filter by window_id.")
+@click.option("--reason", default="", help="Filter by reason.")
+def audit_cmd(last: int, action: str, window: str, reason: str) -> None:
+    """Show recent Telegram audit log entries."""
+    import json
+    import time as _time
+    from datetime import datetime
+    from pathlib import Path
+
+    audit_path = Path.home() / ".ccgram" / "telegram-audit.jsonl"
+    if not audit_path.exists():
+        click.echo("No audit log found at ~/.ccgram/telegram-audit.jsonl")
+        return
+
+    entries = []
+    with open(audit_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    # Apply filters
+    if action:
+        entries = [e for e in entries if e.get("action", "") == action]
+    if window:
+        entries = [e for e in entries if e.get("window_id", "") == window]
+    if reason:
+        entries = [e for e in entries if e.get("reason", "") == reason]
+
+    # Last N entries
+    entries = entries[-last:]
+
+    if not entries:
+        click.echo("No entries match the filters.")
+        return
+
+    # Header
+    header = f"{'TIME':<10} {'ACTION':<20} {'WINDOW':<8} {'THREAD':<8} {'REASON':<22} {'PAYLOAD'}"
+    click.echo(header)
+    click.echo("-" * 90)
+
+    for e in entries:
+        ts = e.get("ts", 0)
+        t = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+        act = e.get("action", "")[:19]
+        wid = e.get("window_id", "")[:7]
+        tid = str(e.get("thread_id") or "")[:7]
+        rsn = e.get("reason", "")[:21]
+        payload = e.get("payload", {})
+        # Render payload as compact key=value
+        pstr = " ".join(f"{k}: {str(v)[:30]}" for k, v in payload.items()) if payload else ""
+        click.echo(f"{t:<10} {act:<20} {wid:<8} {tid:<8} {rsn:<22} {pstr}")

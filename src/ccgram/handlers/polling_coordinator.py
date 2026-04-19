@@ -315,6 +315,13 @@ async def _check_background_work(
         new_name = f"{new_name}{_SUBAGENT_SUFFIX_EXT}"
 
     try:
+        from ..telegram_audit import log_action as _audit
+        _audit(
+            "edit_forum_topic", chat_id, thread_id,
+            window_id=window_id,
+            payload={"new_name": new_name, "old_name": display},
+            reason="bg_work_indicator",
+        )
         await bot.edit_forum_topic(
             chat_id=chat_id,
             message_thread_id=thread_id,
@@ -412,6 +419,13 @@ async def _apply_effort_suffix(
         return
 
     try:
+        from ..telegram_audit import log_action as _audit
+        _audit(
+            "edit_forum_topic", chat_id, thread_id,
+            window_id=window_id,
+            payload={"new_name": new_name, "old_name": display},
+            reason="effort_indicator",
+        )
         await bot.edit_forum_topic(
             chat_id=chat_id,
             message_thread_id=thread_id,
@@ -1078,6 +1092,21 @@ async def _run_periodic_sync_check(bot: Bot) -> None:
 
         # Auto-fix DISABLED — log only, fix via 'ccgram sync-check --fix'
         # Automatic rename causes notification spam when fighting false positives.
+        # Audit-log detected drift (for observability even without auto-fix).
+        from ..telegram_audit import log_action as _audit
+        for _item in drifted:
+            _uid = next(
+                (uid for uid, tid, wid in thread_router.iter_thread_bindings() if wid == _item.window_id),
+                0,
+            )
+            _cid = thread_router.resolve_chat_id(_uid, _item.topic_id)
+            if _cid:
+                _audit(
+                    "edit_forum_topic", _cid, _item.topic_id,
+                    window_id=_item.window_id,
+                    payload={"new_name": _item.correct_name, "old_name": _item.telegram_title},
+                    reason="sync_check_fix",
+                )
         return
         fixed = 0
         for item in drifted:

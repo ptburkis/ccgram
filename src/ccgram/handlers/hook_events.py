@@ -310,6 +310,13 @@ async def _apply_subagent_suffix(bot: Bot, users: list, *, add: bool) -> None:
             continue
         _subagent_suffix_last[window_id] = (add, now)
         try:
+            from ..telegram_audit import log_action as _audit
+            _audit(
+                "edit_forum_topic", chat_id, thread_id,
+                window_id=window_id,
+                payload={"new_name": new_name, "old_name": live},
+                reason="subagent_suffix_add" if add else "subagent_suffix_remove",
+            )
             await bot.edit_forum_topic(
                 chat_id=chat_id,
                 message_thread_id=thread_id,
@@ -543,6 +550,13 @@ async def _handle_stop_failure(event: HookEvent, bot: Bot) -> None:
 
     for user_id, thread_id, _window_id in users:
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
+        from ..telegram_audit import log_action as _audit
+        _audit(
+            "send_message", chat_id, thread_id,
+            window_id=window_id,
+            payload={"error": error, "detail_preview": error_details[:100]},
+            reason="stop_failure_alert",
+        )
         await rate_limit_send_message(bot, chat_id, text, message_thread_id=thread_id)
 
 

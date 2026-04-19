@@ -827,6 +827,13 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 last_msg_id = converted_msg_id
                 continue
 
+        from ..telegram_audit import log_action as _audit
+        _audit(
+            "send_message", chat_id, task.thread_id,
+            window_id=window_id,
+            payload={"text_preview": part[:100]},
+            reason="content_delivery",
+        )
         sent = await rate_limit_send_message(
             bot,
             chat_id,
@@ -977,6 +984,13 @@ async def _process_status_update_task(
             # Same window, text changed - edit in place
             history = _get_idle_history(user_id, thread_id, status_text)
             keyboard = build_status_keyboard(window_id, history=history)
+            from ..telegram_audit import log_action as _audit
+            _audit(
+                "edit_message", stored_chat_id, thread_id,
+                window_id=window_id,
+                payload={"msg_id": msg_id, "text_preview": status_text[:100]},
+                reason="status_edit",
+            )
             success = await edit_with_fallback(
                 bot,
                 stored_chat_id,
@@ -1036,6 +1050,13 @@ async def _do_send_status_message(
         if stored_wid == window_id and text == last_text:
             return  # identical, nothing to do
         if stored_wid == window_id:
+            from ..telegram_audit import log_action as _audit
+            _audit(
+                "edit_message", stored_chat_id, thread_id,
+                window_id=window_id,
+                payload={"msg_id": msg_id, "text_preview": text[:100]},
+                reason="status_edit",
+            )
             success = await edit_with_fallback(
                 bot, stored_chat_id, msg_id, text, reply_markup=keyboard
             )
@@ -1048,6 +1069,13 @@ async def _do_send_status_message(
             # Different window — delete old status first
             await _do_clear_status_message(bot, user_id, thread_id_or_0)
 
+    from ..telegram_audit import log_action as _audit
+    _audit(
+        "send_message", chat_id, thread_id,
+        window_id=window_id,
+        payload={"text_preview": text[:100]},
+        reason="status_update",
+    )
     sent = await rate_limit_send_message(
         bot,
         chat_id,
