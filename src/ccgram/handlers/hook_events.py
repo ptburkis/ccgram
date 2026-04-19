@@ -333,9 +333,23 @@ async def _apply_subagent_suffix(bot: Bot, users: list, *, add: bool) -> None:
             logger.debug("Failed to edit topic for subagent suffix: %s", e)
 
 
+# Grace period: ignore subagent suffix events for the first 30s after bot start.
+# Buffered hooks from pre-restart fire with stale state, adding ⚡ that never
+# gets removed (no matching SubagentStop). The startup_cleanup handles
+# stripping stale suffixes after this window.
+import time as _time
+_SUBAGENT_BOOT_TIME = _time.monotonic()
+_SUBAGENT_GRACE_SECS = 30.0
+
+
 async def _handle_subagent_start(event: HookEvent, bot: Bot) -> None:
     """Handle SubagentStart — track active subagent and notify."""
     from .message_queue import enqueue_status_update
+
+    # Skip stale buffered events during startup grace period
+    if (_time.monotonic() - _SUBAGENT_BOOT_TIME) < _SUBAGENT_GRACE_SECS:
+        logger.debug("SubagentStart: skipped during startup grace period")
+        return
 
     users = _resolve_users_for_window_key(event.window_key)
     if not users:
@@ -379,6 +393,11 @@ async def _handle_subagent_start(event: HookEvent, bot: Bot) -> None:
 async def _handle_subagent_stop(event: HookEvent, bot: Bot) -> None:
     """Handle SubagentStop — remove subagent from tracking and notify."""
     from .message_queue import enqueue_status_update
+
+    # Skip stale buffered events during startup grace period
+    if (_time.monotonic() - _SUBAGENT_BOOT_TIME) < _SUBAGENT_GRACE_SECS:
+        logger.debug("SubagentStop: skipped during startup grace period")
+        return
 
     users = _resolve_users_for_window_key(event.window_key)
     if not users:
