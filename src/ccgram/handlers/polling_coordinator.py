@@ -266,7 +266,9 @@ async def _check_background_work(
         return
 
     agents, tasks = _parse_bg_work_counts(pane_text)
-    has_work = agents > 0 or tasks > 0
+    # Only TASKS trigger 🐚 (shell/bash). Background AGENTS trigger ⚡
+    # via the subagent suffix path (hook_events._apply_subagent_suffix).
+    has_work = tasks > 0
 
     now = time.monotonic()
     prev_detected = _bg_work_detected.get(window_id)
