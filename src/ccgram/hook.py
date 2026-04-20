@@ -531,17 +531,30 @@ def _write_pty_marker(
         if not pty:
             return
 
-        # Subagent filter: only write marker if this process is the direct child
-        # of the tmux pane process (primary claude). Task subagents have a
-        # different parent and must not overwrite the primary session's marker.
+        # Subagent filter: skip if marker is fresh and has a DIFFERENT session_id.
+        # This prevents subagents from overwriting a recently-set primary marker.
+        # BUT allow writes when:
+        #   - marker is stale (>60s old) — primary may have rotated
+        #   - marker has the SAME session_id — safe to refresh last_seen_at
+        #   - no marker exists yet
         if pid is not None and os.getppid() != pid:
-            logger.debug(
-                '_write_pty_marker: skipping — os.getppid()=%d != pane_pid=%d '
-                '(subagent hook)',
-                os.getppid(),
-                pid,
-            )
-            return
+            try:
+                from . import pty_markers
+                existing = pty_markers.read_marker_for_window(window_id)
+                if existing and existing.get('session_id') == session_id:
+                    pass  # Same session — safe to update last_seen_at
+                elif existing and (time.time() - existing.get('last_seen_at', 0)) < 60:
+                    logger.debug(
+                        '_write_pty_marker: skipping — fresh marker with different '
+                        'session_id (subagent hook, pane_pid=%d, our_ppid=%d)',
+                        pid,
+                        os.getppid(),
+                    )
+                    return
+                # else: stale or missing marker — allow write through
+            except Exception:
+                logger.debug('_write_pty_marker: subagent filter check failed', exc_info=True)
+                return  # Fail safe: skip on error
 
         from . import pty_markers
         pty_markers.write_marker(

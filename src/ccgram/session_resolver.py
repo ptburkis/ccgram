@@ -41,6 +41,46 @@ class ClaudeSession:
     file_path: str
 
 
+def _session_map_fallback(
+    session_id: str,
+    conn: "Any",
+    result: "list[tuple[int, str, int]]",
+) -> None:
+    """Populate result from session_map.json when the DB lookup found nothing.
+
+    session_map.json is written by the SessionStart hook and is always current,
+    so it bridges the gap when topic_bindings.session_id hasn't caught up to a
+    rotation yet.  Also self-heals the DB row so the next call uses the fast path.
+    """
+    try:
+        if not config.session_map_file.exists():
+            return
+        sm = json.loads(config.session_map_file.read_text())
+        for key, details in sm.items():
+            if details.get("session_id") != session_id:
+                continue
+            win_id = key.split(":", 1)[1] if ":" in key else key
+            rows = conn.execute(
+                "SELECT user_id, window_id, topic_id FROM topic_bindings "
+                "WHERE window_id=? AND user_id IS NOT NULL",
+                (win_id,),
+            ).fetchall()
+            if rows:
+                result.extend((r[0], r[1], r[2]) for r in rows)
+                conn.execute(
+                    "UPDATE topic_bindings SET session_id=? WHERE window_id=?",
+                    (session_id, win_id),
+                )
+                conn.commit()
+                logger.info(
+                    "find_users: self-healed session_id %s -> window %s",
+                    session_id[:8], win_id,
+                )
+            break
+    except Exception:
+        logger.debug("find_users: session_map fallback failed", exc_info=True)
+
+
 class SessionResolver:
     """Resolves tmux windows to Claude session files and reads message history."""
 
@@ -208,6 +248,10 @@ class SessionResolver:
         Marker-oracle routing: resolves session_id -> window_id via PTY marker,
         then queries topic_bindings by window_id. Insulates from session_id churn
         caused by Task subagent spawns reusing window_ids.
+
+        Last-resort fallback: if the DB query returns nothing, searches
+        session_map.json (always current — hooks update it on every SessionStart)
+        and self-heals topic_bindings.session_id so subsequent lookups are fast.
         """
         import sqlite3 as _sqlite3
         from pathlib import Path as _Path
@@ -244,6 +288,9 @@ class SessionResolver:
                         (session_id,),
                     ).fetchall()
                 result = [(r[0], r[1], r[2]) for r in rows]
+
+                if not result:
+                    _session_map_fallback(session_id, conn, result)
             finally:
                 conn.close()
         except Exception:
