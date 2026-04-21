@@ -1,7 +1,7 @@
 """Usage report — /usage Telegram command.
 
-Fetches account-level rate limits from one Claude Code window and one Codex
-window via scrape-usage.sh. One answer per provider.
+Scrapes rate limits from one Claude Code window (/usage) and one Codex
+window (/status). Returns formatted text for Telegram.
 """
 
 from __future__ import annotations
@@ -18,55 +18,57 @@ _SCRAPE_SCRIPT = os.environ.get(
     "CCGRAM_SCRAPE_SCRIPT",
     "/home/peter/ccgram-dashboard/scrape-usage.sh",
 )
-_SCRAPE_CLAUDE_WINDOW = os.environ.get("CCGRAM_SCRAPE_CLAUDE_WINDOW", "usage-scraper")
-_SCRAPE_CODEX_WINDOW = os.environ.get("CCGRAM_SCRAPE_CODEX_WINDOW", "usage-scraper-codex")
+_CLAUDE_WINDOW = os.environ.get("CCGRAM_SCRAPE_CLAUDE_WINDOW", "usage-scraper")
+_CODEX_WINDOW = os.environ.get("CCGRAM_SCRAPE_CODEX_WINDOW", "usage-scraper-codex")
 
 
 def _run_scraper() -> dict:
-    """Run scrape-usage.sh and return parsed JSON. Blocking."""
+    """Run scrape-usage.sh. Blocking, ~18s."""
     try:
-        tmux_session = os.environ.get("TMUX_SESSION_NAME", "ccgram")
-        result = subprocess.run(
-            [_SCRAPE_SCRIPT, _SCRAPE_CLAUDE_WINDOW, _SCRAPE_CODEX_WINDOW],
-            capture_output=True, text=True, timeout=25,
-            env={**os.environ, "TMUX_SESSION_NAME": tmux_session},
+        env = {**os.environ, "TMUX_SESSION_NAME": os.environ.get("TMUX_SESSION_NAME", "ccgram")}
+        r = subprocess.run(
+            [_SCRAPE_SCRIPT, _CLAUDE_WINDOW, _CODEX_WINDOW],
+            capture_output=True, text=True, timeout=25, env=env,
         )
-        if result.returncode != 0 or not result.stdout.strip():
+        if r.returncode != 0 or not r.stdout.strip():
             return {}
-        return json.loads(result.stdout.strip())
+        return json.loads(r.stdout.strip())
     except Exception:
         logger.debug("usage_report: scraper failed", exc_info=True)
         return {}
 
 
 async def generate_usage_report() -> str:
-    """Generate a usage report: Claude rate limits + Codex rate limits."""
+    """Scrape and format usage report."""
     data = await asyncio.to_thread(_run_scraper)
     lines: list[str] = []
 
-    session = data.get("session", {})
-    week = data.get("weekAll", {})
-    if session or week:
+    # Claude
+    s = data.get("session")
+    wa = data.get("weekAll")
+    ws = data.get("weekSonnet")
+    if s or wa or ws:
         lines.append("Claude")
-        if session:
-            pct = session["percent"]
-            resets = session.get("resets", "?")
-            lines.append(f"  5h: {pct}% used (resets {resets})")
-        if week:
-            pct = week["percent"]
-            resets = week.get("resets", "?")
-            lines.append(f"  Weekly: {pct}% used (resets {resets})")
+        if s:
+            lines.append(f"  Session: {s['percent']}% used (resets {s['resets']})")
+        if wa:
+            lines.append(f"  Week (all): {wa['percent']}% used (resets {wa['resets']})")
+        if ws:
+            lines.append(f"  Week (Sonnet): {ws['percent']}% used (resets {ws['resets']})")
     else:
-        lines.append("Claude — no rate limit data")
+        lines.append("Claude — no data (scraper may have timed out)")
 
     lines.append("")
 
-    codex = data.get("codex", {})
-    if codex:
+    # Codex
+    c5 = data.get("codex5h")
+    cw = data.get("codexWeekly")
+    if c5 or cw:
         lines.append("Codex")
-        remaining = codex.get("remaining", "?")
-        resets = codex.get("resets", "?")
-        lines.append(f"  Weekly: {remaining}% left (resets {resets})")
+        if c5:
+            lines.append(f"  5h: {c5['percent_left']}% left (resets {c5['resets']})")
+        if cw:
+            lines.append(f"  Weekly: {cw['percent_left']}% left (resets {cw['resets']})")
     else:
         lines.append("Codex — no data")
 
