@@ -265,6 +265,9 @@ async def _check_background_work(
     if thread_id is None:
         return
 
+    if config.is_system_window_id(window_id):
+        return
+
     agents, tasks = _parse_bg_work_counts(pane_text)
     # Only TASKS trigger 🐚 (shell/bash). Background AGENTS trigger ⚡
     # via the subagent suffix path (hook_events._apply_subagent_suffix).
@@ -377,6 +380,8 @@ async def _apply_effort_suffix(
     keep their base and only update the suffix. Falls back to window-name
     behaviour when MTProto is unavailable. Never blocks the poll loop.
     """
+    if config.is_system_window_id(window_id):
+        return
     user_id = next(
         (
             uid
@@ -1079,6 +1084,8 @@ async def _run_periodic_sync_check(bot: Bot) -> None:
             len(report.items),
         )
         for item in drifted:
+            if config.is_system_window_id(item.window_id):
+                continue
             logger.warning(
                 "sync_check drift: %s tid=%d tg=%r correct=%r bolt=%s/%s shell=%s/%s effort=%s",
                 item.window_id,

@@ -699,7 +699,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
 
     # Find users whose thread-bound window matches this session.
     # window_id_hint removed: session_id is now always the ccgram routing id.
-    active_users = session_manager.find_users_for_session(msg.session_id)
+    active_users = session_manager.find_users_for_session(msg.session_id, window_id_hint=getattr(msg, "window_id", "") or "")
 
     if not active_users:
         logger.info("No active users for session %s", msg.session_id)
@@ -732,6 +732,23 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         # token HEARTBEAT_OK. These should never reach the user's chat.
         if msg.content_type == "text" and (msg.text or "").strip() == "HEARTBEAT_OK":
             continue
+
+        # Drop rate-limit / upgrade / login prompts — these are Claude Code
+        # TUI messages that shouldn't be forwarded to Telegram. On smaller
+        # subscriptions (Pro) these fire repeatedly and spam the topic.
+        if msg.content_type == "text" and msg.text:
+            _lower = msg.text.strip().lower()
+            if any(phrase in _lower for phrase in (
+                "you've hit your limit",
+                "you have hit your limit",
+                "hit your usage limit",
+                "/upgrade",
+                "login interrupted",
+                "please run /login",
+                "oauth error",
+                "press enter to retry",
+            )):
+                continue
 
         # Don't echo user messages back in summary mode — the user already
         # sees their own message in Telegram. The 👤 echo is redundant noise.
@@ -931,6 +948,35 @@ async def post_init(application: Application) -> None:
     await _cleanup_stale_topic_suffixes(application.bot)
 
     await _adopt_unbound_windows(application.bot)
+
+    # Ensure system windows exist — spawn any that are missing
+    import subprocess as _subprocess
+    for _win_name, _provider in config.system_windows:
+        _existing = await tmux_manager.find_window_by_name(_win_name)
+        if _existing:
+            config._system_window_ids.add(_existing.window_id)
+            logger.info("System window '%s' found: %s", _win_name, _existing.window_id)
+        else:
+            # Create window via subprocess (avoids create_window's dir requirement)
+            _result = _subprocess.run(
+                ["tmux", "new-window", "-t", config.tmux_session_name, "-n", _win_name],
+                capture_output=True,
+            )
+            if _result.returncode == 0:
+                # Find the newly created window
+                _new_win = await tmux_manager.find_window_by_name(_win_name)
+                if _new_win:
+                    config._system_window_ids.add(_new_win.window_id)
+                    if _provider == "claude":
+                        _cmd = "claude --dangerously-skip-permissions"
+                    elif _provider == "codex":
+                        _cmd = "codex --dangerously-bypass-approvals-and-sandbox"
+                    else:
+                        _cmd = _provider
+                    await tmux_manager.send_keys(_new_win.window_id, _cmd, raw=True)
+                    logger.info("System window '%s' spawned: %s (%s)", _win_name, _new_win.window_id, _provider)
+            else:
+                logger.warning("Failed to create system window '%s': %s", _win_name, _result.stderr.decode())
 
     # Warn if Claude Code hooks are not installed (provider-aware, non-blocking)
     provider = get_provider()

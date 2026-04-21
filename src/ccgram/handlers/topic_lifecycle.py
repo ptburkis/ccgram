@@ -127,7 +127,7 @@ async def check_unbound_window_ttl(
 
     now = time.monotonic()
     for w in live_windows:
-        if w.window_id not in bound_ids and not is_foreign_window(w.window_id):
+        if w.window_id not in bound_ids and not is_foreign_window(w.window_id) and not config.is_system_window(w.window_name or ""):
             ws = terminal_strategy.get_state(w.window_id)
             if ws.unbound_timer is None:
                 terminal_strategy.set_unbound_timer(w.window_id, now)

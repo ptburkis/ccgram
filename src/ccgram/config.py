@@ -176,6 +176,18 @@ class Config:
         self.autoclose_done_minutes = int(os.getenv("AUTOCLOSE_DONE_MINUTES", "30"))
         self.autoclose_dead_minutes = int(os.getenv("AUTOCLOSE_DEAD_MINUTES", "10"))
 
+        # System windows: internal tmux windows never bound to Telegram topics.
+        # Format: comma-separated "name:provider" pairs.
+        self.system_windows: list[tuple[str, str]] = []
+        raw = os.getenv("CCGRAM_SYSTEM_WINDOWS", "usage-scraper:claude,usage-scraper-codex:codex")
+        if raw.strip():
+            for entry in raw.split(","):
+                parts = entry.strip().split(":", 1)
+                if len(parts) == 2:
+                    self.system_windows.append((parts[0].strip(), parts[1].strip()))
+        # Runtime set, populated on startup by bot.py
+        self._system_window_ids: set[str] = set()
+
         logger.debug(
             "Config initialized: dir=%s, token=%s..., allowed_users=%d, "
             "tmux_session=%s",
@@ -230,6 +242,14 @@ class Config:
     def is_user_allowed(self, user_id: int) -> bool:
         """Check if a user is in the allowed list."""
         return user_id in self.allowed_users
+
+    def is_system_window(self, window_name: str) -> bool:
+        """Check if a window name matches a configured system window."""
+        return any(name == window_name for name, _ in self.system_windows)
+
+    def is_system_window_id(self, window_id: str) -> bool:
+        """Check by window_id — populated on startup by bot.py."""
+        return window_id in self._system_window_ids
 
 
 config = Config()

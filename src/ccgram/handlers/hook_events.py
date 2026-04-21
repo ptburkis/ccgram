@@ -19,6 +19,8 @@ import structlog
 
 from telegram import Bot
 
+from ..config import config
+
 from ..claude_task_state import claude_task_state, classify_wait_message
 from ..providers.base import HookEvent
 from ..session import session_manager
@@ -289,6 +291,8 @@ async def _apply_subagent_suffix(bot: Bot, users: list, *, add: bool) -> None:
     from .topic_emoji import _topic_names as _topic_names_cache
 
     for user_id, thread_id, window_id in users:
+        if config.is_system_window_id(window_id):
+            continue
         chat_id = thread_router.resolve_chat_id(user_id, thread_id)
         if not chat_id:
             continue

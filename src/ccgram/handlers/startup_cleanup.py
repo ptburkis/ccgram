@@ -13,6 +13,7 @@ import structlog
 from telegram import Bot
 from telegram.error import RetryAfter, TelegramError
 
+from ..config import config
 from ..session import session_manager
 from ..thread_router import thread_router
 from .hook_events import _strip_both_suffixes
@@ -29,6 +30,8 @@ async def cleanup_stale_topic_suffixes(bot: Bot) -> None:
     cleaned = 0
     for user_id, thread_id, window_id in thread_router.iter_thread_bindings():
         if not window_id:
+            continue
+        if config.is_system_window_id(window_id):
             continue
         display = thread_router.get_display_name(window_id) or ""
         clean = _strip_both_suffixes(display)

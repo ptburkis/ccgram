@@ -934,9 +934,16 @@ class SessionMonitor:
             )
             return
 
+        # Build set of session_ids belonging to system windows (never clean these up)
+        system_session_ids: set[str] = set()
+        for details in current_map.values():
+            wname = details.get("window_name", "")
+            if config.is_system_window(wname):
+                system_session_ids.add(details["session_id"])
+
         stale_sessions = []
         for session_id in self.state.tracked_sessions:
-            if session_id not in active_session_ids:
+            if session_id not in active_session_ids and session_id not in system_session_ids:
                 stale_sessions.append(session_id)
 
         if stale_sessions:
@@ -1254,7 +1261,7 @@ class SessionMonitor:
         desired: dict[int, dict[int, str]] = {}
         for b in bindings:
             uid = gid_tid_to_uid.get((b.group_id, b.topic_id))
-            wid = sid_to_wid.get(b.session_id)
+            wid = b.window_id or sid_to_wid.get(b.session_id)
             if uid is None or wid is None:
                 continue
             desired.setdefault(uid, {})[b.topic_id] = wid

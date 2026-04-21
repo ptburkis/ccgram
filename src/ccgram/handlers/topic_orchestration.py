@@ -223,6 +223,10 @@ async def handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
         )
         return
 
+    if config.is_system_window(event.window_name or ""):
+        logger.debug("Skipping alert for system window %s", event.window_id)
+        return
+
     if _is_window_already_bound(event.window_id):
         logger.debug("New window %s already bound, skipping alert", event.window_id)
         return
