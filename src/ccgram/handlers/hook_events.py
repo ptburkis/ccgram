@@ -322,7 +322,9 @@ async def _apply_subagent_suffix(bot: Bot, users: list, *, add: bool) -> None:
                 message_thread_id=thread_id,
                 name=new_name,
             )
-            session_manager.set_display_name(window_id, new_name)
+            # Save CLEAN name (without ⚡/🐚 suffix) — suffixes are transient
+            # and must not persist across restarts
+            session_manager.set_display_name(window_id, clean)
             logger.debug(
                 "Subagent suffix %s: %s -> %r",
                 "added" if add else "removed",

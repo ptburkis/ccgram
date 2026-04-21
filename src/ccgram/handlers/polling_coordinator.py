@@ -331,7 +331,7 @@ async def _check_background_work(
         )
         _bg_work_shown[window_id] = has_work
         _save_bg_work_state()
-        session_manager.set_display_name(window_id, new_name)
+        session_manager.set_display_name(window_id, clean_name)  # save WITHOUT suffix
         logger.debug(
             "Background work indicator: %s -> %r",
             window_id,
@@ -435,7 +435,7 @@ async def _apply_effort_suffix(
         )
         _effort_shown[window_id] = level
         _save_effort_state()
-        session_manager.set_display_name(window_id, new_name)
+        # Don't save effort suffix into display_name — it's transient
         logger.debug("Effort indicator: %s -> %r", window_id, new_name)
     except TelegramError:
         pass  # non-critical, silently degrade
@@ -1042,7 +1042,7 @@ async def _clear_stale_bg_indicators(bot: Bot) -> None:
                 message_thread_id=thread_id,
                 name=new_name,
             )
-            session_manager.set_display_name(window_id, new_name)
+            session_manager.set_display_name(window_id, clean_name)  # save WITHOUT suffix
             logger.info(
                 "Startup indicator reconcile for %s: %r -> %r",
                 window_id,
