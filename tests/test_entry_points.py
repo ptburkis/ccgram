@@ -192,7 +192,7 @@ async def test_directory_callbacks_create_session_shadow_write(ccgram_test_dir):
     create_session_mock.assert_awaited_once()
     call_kwargs = create_session_mock.call_args.kwargs
     assert call_kwargs["cwd"] == "/home/peter/proj"
-    assert call_kwargs["topic_name"] == "my-proj"
+    assert call_kwargs["topic_name"] == "proj-claude"  # derived from path+provider
     assert call_kwargs["agent"] == "claude"
     assert call_kwargs["existing_topic_id"] == 55
 

@@ -160,6 +160,10 @@ _tmux_send_keys_fn: TmuxSendFn = _not_configured  # type: ignore[assignment]
 _tmux_kill_window_fn: TmuxKillFn = _not_configured  # type: ignore[assignment]
 _resolve_launch_fn: ResolveLaunchFn = _sync_not_configured  # type: ignore[assignment]
 
+# Optional capture_pane for readiness checks — defaults to tmux_manager at runtime.
+# Tests may patch this directly.  None means fall back to tmux_manager.capture_pane.
+_tmux_capture_pane_fn: Callable[[str], Awaitable[str | None]] | None = None
+
 
 @dataclass(slots=True)
 class LifecycleDeps:
@@ -197,6 +201,96 @@ def configure(deps: LifecycleDeps) -> None:
 # ---- Public API --------------------------------------------------------------
 
 
+async def _accept_bypass_permissions(window_id: str, *, timeout: float = 8.0) -> None:
+    """Detect and accept Claude Code's bypass permissions confirmation prompt.
+
+    When launched with --dangerously-skip-permissions, Claude Code shows a
+    TUI confirmation where 'No, exit' is the default selection.  Sends
+    Down+Enter to select the 'Yes' option so the session can start.
+    Uses the injected capture fn or falls back to tmux_manager.
+    """
+    import asyncio
+
+    async def _capture(wid: str) -> str | None:
+        if _tmux_capture_pane_fn is not None:
+            return await _tmux_capture_pane_fn(wid)
+        from .tmux_manager import tmux_manager as _tm
+        return await _tm.capture_pane(wid)
+
+    async def _send(wid: str, key: str) -> None:
+        from .tmux_manager import tmux_manager as _tm
+        await _tm.send_keys(wid, key, enter=False, literal=False)
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        text = await _capture(window_id)
+        if text and "bypass permissions" in text.lower():
+            await asyncio.sleep(0.3)
+            await _send(window_id, "Down")
+            await asyncio.sleep(0.15)
+            await _send(window_id, "Enter")
+            logger.info(
+                "session_lifecycle.bypass_permissions_accepted", window_id=window_id
+            )
+            return
+        await asyncio.sleep(0.5)
+    logger.warning(
+        "session_lifecycle.bypass_permissions_not_detected",
+        window_id=window_id,
+        timeout=timeout,
+    )
+
+
+async def _verify_agent_ready(
+    window_id: str,
+    agent: str,
+    mode: str | None,
+    *,
+    timeout: float = 30.0,
+    poll_interval: float = 1.5,
+) -> bool:
+    """Poll pane content until agent shows signs of being ready.
+
+    Returns True when a success signal is found, False on timeout or failure.
+    """
+    import asyncio
+
+    # Use injected capture fn, or fall back to tmux_manager at runtime.
+    async def _capture(wid: str) -> str | None:
+        if _tmux_capture_pane_fn is not None:
+            return await _tmux_capture_pane_fn(wid)
+        from .tmux_manager import tmux_manager
+        return await tmux_manager.capture_pane(wid)
+
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            pane = await _capture(window_id)
+            if not pane:
+                await asyncio.sleep(poll_interval)
+                continue
+
+            # Failure signals — abort early
+            if "command not found" in pane or "No such file" in pane:
+                return False
+
+            # Success signals per provider
+            if agent == "claude":
+                if "bypass permissions" in pane or "\u276f" in pane or "Claude Code" in pane:
+                    return True
+            elif agent == "codex":
+                if "gpt-" in pane or "\u203a" in pane or "OpenAI Codex" in pane:
+                    return True
+            else:
+                if "\u276f" in pane or "\u203a" in pane:
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.sleep(poll_interval)
+    return False
+
+
 async def create_session(
     *,
     cwd: str,
@@ -205,6 +299,9 @@ async def create_session(
     group_id: int,
     mode: str | None = None,
     existing_topic_id: int | None = None,
+    verify_ready: bool = True,
+    ready_timeout: float = 30.0,
+    on_progress: Callable[[str], Awaitable[None]] | None = None,
 ) -> str:
     """Spawn a new agent session, binding it to a Telegram forum topic.
 
@@ -220,6 +317,9 @@ async def create_session(
         mode: Optional provider mode (e.g. ``'yolo'``).
         existing_topic_id: If set, reuse this topic (verify via MTProto)
             instead of creating a new one.
+        verify_ready: If True, poll pane content to verify agent started.
+        ready_timeout: Seconds to wait for readiness signal.
+        on_progress: Optional async callback for progress messages.
 
     Returns:
         The minted ``session_id`` (UUID string).
@@ -235,6 +335,9 @@ async def create_session(
         SessionLifecycleError: any other step failure; rollback attempted.
     """
     session_id = str(uuid.uuid4())
+
+    if on_progress:
+        await on_progress(f"\U0001f680 Spawning {topic_name} ({agent})...")
 
     # Step 1: insert pending row.
     with store.connect() as conn:
@@ -280,6 +383,9 @@ async def create_session(
         # Step 3b: bootstrap write-path hooks into the project's settings.json.
         _bootstrap_hook_config(cwd)
 
+        if on_progress:
+            await on_progress(f"\u23f3 Starting {agent}, waiting for readiness...")
+
         # Step 4: launch agent with CCGRAM_SESSION_ID marker.
         try:
             launch_cmd = _resolve_launch_fn(agent, mode)
@@ -297,6 +403,29 @@ async def create_session(
             raise AgentLaunchError(
                 f"Failed to launch {agent} in window {window_id}: {exc}"
             ) from exc
+
+        # Step 4b: verify agent started.
+        if verify_ready:
+            ready = await _verify_agent_ready(window_id, agent, mode, timeout=ready_timeout)
+            if not ready:
+                logger.warning(
+                    "session_lifecycle.agent_readiness_timeout",
+                    window_id=window_id,
+                    agent=agent,
+                )
+                if on_progress:
+                    await on_progress(f"\u26a0\ufe0f {agent} may not have started correctly")
+
+        # Step 4c: accept Claude YOLO bypass-permissions prompt if needed.
+        if agent == "claude" and mode and "yolo" in mode.lower() and window_id:
+            try:
+                await _accept_bypass_permissions(window_id)
+            except Exception as _yolo_exc:  # noqa: BLE001
+                logger.warning(
+                    "session_lifecycle.bypass_accept_failed",
+                    window_id=window_id,
+                    error=str(_yolo_exc),
+                )
 
         # Step 5: bind topic → session in the DB. Atomic with the session
         # status update below via the same connect() context.
@@ -331,6 +460,32 @@ async def create_session(
                 status="active",
                 window_id=window_id,
             )
+
+        # After DB writes: update thread_router in-memory so the running bot
+        # knows about the new binding without a restart.  Without this, the
+        # binding exists in DB but text_handler._handle_unbound_topic shows
+        # the picker again because the in-memory router is stale.
+        try:
+            from .thread_router import thread_router as _thread_router
+            from .config import config as _config
+
+            admin_uid = next(iter(_config.allowed_users), 0)
+            if admin_uid and topic_id:
+                _thread_router.bind_thread(admin_uid, topic_id, window_id, window_name=topic_name)
+                _thread_router.set_group_chat_id(admin_uid, topic_id, group_id)
+                logger.info(
+                    "create_session: bound thread %d -> %s in-memory",
+                    topic_id,
+                    window_id,
+                )
+        except Exception as _tr_exc:  # noqa: BLE001
+            logger.warning(
+                "session_lifecycle.thread_router_update_failed",
+                error=str(_tr_exc),
+            )
+
+        if on_progress:
+            await on_progress(f"\u2705 {topic_name} ready")
 
         logger.info(
             "session_lifecycle.create_ok",

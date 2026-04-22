@@ -171,6 +171,15 @@ async def _check_ui_guards(
     return False
 
 
+def _detect_provider_from_name(topic_name: str) -> str | None:
+    """Detect provider from a topic name suffix like 'myproject-claude'."""
+    lower = topic_name.lower()
+    for provider in ("codex", "claude", "gemini"):
+        if lower.endswith(f"-{provider}"):
+            return provider
+    return None
+
+
 async def _handle_unbound_topic(
     user_id: int,
     thread_id: int,

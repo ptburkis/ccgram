@@ -29,3 +29,22 @@ def _clear_window_store():
     claude_task_state.reset()
     window_store.window_states.clear()
     thread_router.reset()
+
+
+@pytest.fixture(autouse=True)
+def _patch_session_lifecycle_capture(monkeypatch):
+    """Stub _tmux_capture_pane_fn so readiness checks don't hit real tmux.
+
+    The default returns a Claude-style ready signal.  Individual tests may
+    override this by patching session_lifecycle._tmux_capture_pane_fn again
+    after this fixture runs.
+    """
+    from unittest.mock import AsyncMock
+    from ccgram import session_lifecycle
+    monkeypatch.setattr(
+        session_lifecycle,
+        "_tmux_capture_pane_fn",
+        # Return a pane text that satisfies all provider readiness checks.
+        # Claude: '❯' or 'Claude Code'; Codex: 'gpt-'; else: '❯'
+        AsyncMock(return_value="Claude Code gpt-4\n❯ "),
+    )

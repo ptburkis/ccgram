@@ -524,7 +524,7 @@ def _try_install_messaging_skill(provider_name: str, cwd: str) -> None:
         logger.exception("Failed to install messaging skill at %s", cwd)
 
 
-async def _create_window_and_bind(  # noqa: PLR0912
+async def _create_window_and_bind(
     query: CallbackQuery,
     user_id: int,
     selected_path: str,
@@ -534,103 +534,93 @@ async def _create_window_and_bind(  # noqa: PLR0912
 ) -> None:
     """Create a tmux window, bind to the pending topic, and forward pending text.
 
+    Delegates entirely to session_lifecycle.create_session, which is the single
+    authoritative entry point for spawning an agent session.  All tmux window
+    creation, DB writes, and in-memory thread_router updates happen inside
+    create_session — no duplication here.
+
     Shared by _handle_mode_select (after mode picker) and _handle_provider_select
     (when mode picker is skipped for providers without YOLO flags).
     """
-    from ccgram.providers import resolve_launch_command
+    from ccgram import session_lifecycle as _sl
 
     pending_thread_id: int | None = (
         context.user_data.get(PENDING_THREAD_ID) if context.user_data else None
     )
 
-    launch_command = resolve_launch_command(provider_name, approval_mode=approval_mode)
-
-    success, message, created_wname, created_wid = await tmux_manager.create_window(
-        selected_path, launch_command=launch_command
+    query_message = query.message
+    chat = query_message.chat if query_message else None
+    chat_id = (
+        chat.id if (chat and chat.type in ("group", "supergroup")) else 0
     )
-    if not success:
-        await safe_edit(query, f"❌ {message}")
-        if pending_thread_id is not None and context.user_data is not None:
+
+    # Derive a topic name from the path + provider (used only when there is no
+    # Telegram topic to bind to; the existing topic title takes precedence via
+    # existing_topic_id path in create_session).
+    topic_name = f"{Path(selected_path).name}-{provider_name}"
+
+    async def _progress(msg: str) -> None:
+        try:
+            await context.bot.send_message(
+                chat_id, msg, message_thread_id=pending_thread_id
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    on_progress = _progress if (chat_id and pending_thread_id) else None
+
+    try:
+        session_id = await _sl.create_session(
+            cwd=selected_path,
+            topic_name=topic_name,
+            agent=provider_name,
+            group_id=chat_id,
+            mode=approval_mode,
+            existing_topic_id=pending_thread_id,
+            on_progress=on_progress,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "directory_callbacks: create_session failed for thread=%s path=%s: %s",
+            pending_thread_id,
+            selected_path,
+            exc,
+        )
+        await safe_edit(query, f"\u274c Failed to create session: {exc}")
+        if context.user_data is not None:
             context.user_data.pop(PENDING_THREAD_ID, None)
             context.user_data.pop(PENDING_THREAD_TEXT, None)
         return
 
+    # create_session succeeded — look up the window_id from thread_router
+    # (create_session wired it in-memory) so we can forward pending text.
+    created_wid = thread_router.get_window_for_thread(user_id, pending_thread_id) if pending_thread_id else None
+
     user_preferences.update_user_mru(user_id, selected_path)
-    window_state = session_manager.get_window_state(created_wid)
-    window_state.cwd = selected_path
-    session_manager.set_window_provider(created_wid, provider_name)
-    session_manager.set_window_approval_mode(created_wid, approval_mode)
-    logger.info(
-        "Window created: %s (id=%s) at %s provider=%s mode=%s (user=%d, thread=%s)",
-        created_wname,
-        created_wid,
-        selected_path,
-        provider_name,
-        approval_mode,
-        user_id,
-        pending_thread_id,
-    )
-    await tmux_manager.stamp_pane_title(created_wid, provider_name)
 
-    if provider_name == "shell":
-        from ccgram.providers.shell import setup_shell_prompt
+    if created_wid:
+        window_state = session_manager.get_window_state(created_wid)
+        window_state.cwd = selected_path
+        session_manager.set_window_provider(created_wid, provider_name)
+        session_manager.set_window_approval_mode(created_wid, approval_mode)
 
-        await _wait_for_shell_ready(created_wid)
-        await setup_shell_prompt(created_wid)
+        _try_install_messaging_skill(provider_name, selected_path)
 
-    _try_install_messaging_skill(provider_name, selected_path)
+        if provider_name == "shell":
+            from ccgram.providers.shell import setup_shell_prompt
+            await _wait_for_shell_ready(created_wid)
+            await setup_shell_prompt(created_wid)
 
-    if pending_thread_id is not None:
-        thread_router.bind_thread(
-            user_id, pending_thread_id, created_wid, window_name=created_wname
-        )
-        query_message = query.message
-        chat = query_message.chat if query_message else None
-        if chat and chat.type in ("group", "supergroup"):
-            thread_router.set_group_chat_id(user_id, pending_thread_id, chat.id)
+        if provider_registry.get(provider_name).capabilities.supports_hook:
+            await session_manager.wait_for_session_map_entry(created_wid)
 
-        # State unification shadow write: also record in unified DB store.
-        # Legacy writes above remain authoritative during migration — this is
-        # belt-and-braces so every new session gets a DB row.
-        try:
-            from ccgram import session_lifecycle as _sl
-
-            group_id = (
-                chat.id if (chat and chat.type in ("group", "supergroup")) else None
-            )
-            if group_id is not None:
-                await _sl.create_session(
-                    cwd=selected_path,
-                    topic_name=created_wname,
-                    agent=provider_name,
-                    mode=approval_mode,
-                    group_id=group_id,
-                    existing_topic_id=pending_thread_id,
-                )
-        except Exception as _exc:  # noqa: BLE001
-            logger.warning(
-                "directory_callbacks: create_session shadow write failed: %s", _exc
-            )
-
-    if approval_mode == "yolo" and provider_name == "claude":
-        await _accept_yolo_confirmation(created_wid)
-
-    if provider_registry.get(provider_name).capabilities.supports_hook:
-        await session_manager.wait_for_session_map_entry(created_wid)
-
-    if pending_thread_id is None:
-        await safe_edit(query, f"✅ {message}")
+    if pending_thread_id is None or not created_wid:
+        await safe_edit(query, "\u2705 Session started.")
         return
-
-    # Preserve the user's chosen topic name. Earlier versions of this flow
-    # auto-renamed the topic to the directory basename + a mode badge, which
-    # overwrote whatever name the user typed when creating the topic in
-    # Telegram. The window name is still tracked internally so ccgram knows
-    # the project context — only the visible Telegram title is left alone.
 
     await safe_edit(
         query,
-        f"✅ {message}\n\nBound to this topic. Send messages here.",
+        "\u2705 Session started.\n\nBound to this topic. Send messages here.",
     )
 
     pending_text = (
@@ -639,7 +629,7 @@ async def _create_window_and_bind(  # noqa: PLR0912
     if pending_text:
         logger.debug(
             "Forwarding pending text to window %s (len=%d)",
-            created_wname,
+            created_wid,
             len(pending_text),
         )
         if context.user_data is not None:
@@ -664,7 +654,7 @@ async def _create_window_and_bind(  # noqa: PLR0912
                 await safe_send(
                     context.bot,
                     thread_router.resolve_chat_id(user_id, pending_thread_id),
-                    f"❌ Failed to send pending message: {send_msg}",
+                    f"\u274c Failed to send pending message: {send_msg}",
                     message_thread_id=pending_thread_id,
                 )
     elif context.user_data is not None:
