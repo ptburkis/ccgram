@@ -21,10 +21,17 @@ async def generate_usage_report() -> str:
     lines: list[str] = []
     s = data.get("session")
     w = data.get("weekAll")
+    def _fmt_resets(r):
+        if isinstance(r, (int, float)) and r > 1000000000:
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(r, tz=timezone.utc).astimezone()
+            return dt.strftime("%a %H:%M")
+        return str(r)
+
     if s or w:
         lines.append("Claude")
-        if s: lines.append(f"  5h: {s['percent']}% used (resets {s['resets']})")
-        if w: lines.append(f"  Weekly: {w['percent']}% used (resets {w['resets']})")
+        if s: lines.append(f"  5h: {s['percent']}% used (resets {_fmt_resets(s['resets'])})")
+        if w: lines.append(f"  Weekly: {w['percent']}% used (resets {_fmt_resets(w['resets'])})")
     else:
         lines.append("Claude — no data (cache stale or sessions not restarted yet)")
     lines.append("")
