@@ -152,7 +152,7 @@ def _update_session_map_sync(
                 if map_file.exists():
                     try:
                         session_map = json.loads(map_file.read_text())
-                    except json.JSONDecodeError, OSError:
+                    except (json.JSONDecodeError, OSError):
                         pass
 
                 entry = session_map.get(window_key)
@@ -180,6 +180,21 @@ def _update_session_map_sync(
                 entry["transcript_path"] = new_transcript
                 session_map[window_key] = entry
                 atomic_write_json(map_file, session_map)
+
+                # Keep topic_binding session_id in sync with rotation.
+                try:
+                    import sqlite3
+                    db_path = Path.home() / ".ccgram" / "state.db"
+                    if db_path.exists():
+                        db_conn = sqlite3.connect(str(db_path))
+                        db_conn.execute(
+                            "UPDATE topic_bindings SET session_id=? WHERE window_id=?",
+                            (new_sid, window_id),
+                        )
+                        db_conn.commit()
+                        db_conn.close()
+                except Exception:
+                    pass
             finally:
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
     except OSError:
@@ -210,7 +225,7 @@ def _update_monitor_state_sync(
         if state_file.exists():
             try:
                 data = json.loads(state_file.read_text())
-            except json.JSONDecodeError, OSError:
+            except (json.JSONDecodeError, OSError):
                 pass
 
         tracked = data.get("tracked_sessions", {})

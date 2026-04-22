@@ -288,9 +288,38 @@ class SessionResolver:
                         (session_id,),
                     ).fetchall()
                 result = [(r[0], r[1], r[2]) for r in rows]
-
                 if not result:
-                    _session_map_fallback(session_id, conn, result)
+                    # Last-resort fallback: session_map.json is always current
+                    # (hooks update it reliably even when marker/DB haven't caught up).
+                    # If we find the session_id there, look up the binding by window_id
+                    # and self-heal topic_bindings so subsequent lookups are instant.
+                    try:
+                        if config.session_map_file.exists():
+                            sm = json.loads(config.session_map_file.read_text())
+                            for key, details in sm.items():
+                                if details.get('session_id') == session_id:
+                                    win_id = key.split(':', 1)[1] if ':' in key else key
+                                    rows = conn.execute(
+                                        'SELECT user_id, window_id, topic_id FROM topic_bindings '
+                                        'WHERE window_id=? AND user_id IS NOT NULL',
+                                        (win_id,),
+                                    ).fetchall()
+                                    if rows:
+                                        result = [(r[0], r[1], r[2]) for r in rows]
+                                        # Self-heal: stamp the new session_id so future
+                                        # lookups succeed without hitting this path again.
+                                        conn.execute(
+                                            'UPDATE topic_bindings SET session_id=? WHERE window_id=?',
+                                            (session_id, win_id),
+                                        )
+                                        conn.commit()
+                                        logger.info(
+                                            'find_users: self-healed session_id %s -> window %s',
+                                            session_id[:8], win_id,
+                                        )
+                                    break
+                    except Exception:
+                        logger.debug('find_users: session_map fallback failed', exc_info=True)
             finally:
                 conn.close()
         except Exception:

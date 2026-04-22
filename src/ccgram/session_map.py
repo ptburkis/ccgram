@@ -116,7 +116,7 @@ class SessionMapSync:
         try:
             with store.connect() as conn:
                 sessions = store.list_sessions(conn)
-        except sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError:
+        except (sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError):
             sessions = []
         if not sessions:
             logger.warning(

@@ -260,7 +260,7 @@ class Mailbox:
             try:
                 with open(entry.path, encoding="utf-8") as f:
                     data = json.load(f)
-            except json.JSONDecodeError, OSError:
+            except (json.JSONDecodeError, OSError):
                 continue
             msg = Message.from_dict(data)
             if msg.is_expired():
@@ -284,7 +284,7 @@ class Mailbox:
             try:
                 with open(entry.path, encoding="utf-8") as f:
                     data = json.load(f)
-            except json.JSONDecodeError, OSError:
+            except (json.JSONDecodeError, OSError):
                 continue
             msg = Message.from_dict(data)
             if msg.is_expired():
@@ -359,7 +359,7 @@ class Mailbox:
                     context=context,
                 )
                 sent.append(msg)
-            except ValueError, OSError:
+            except (ValueError, OSError):
                 logger.warning("Broadcast send failed", from_id=from_id, to_id=to_id)
         return sent
 
@@ -437,7 +437,7 @@ class Mailbox:
                 data = json.load(f)
         except FileNotFoundError:
             return 0
-        except json.JSONDecodeError, OSError:
+        except (json.JSONDecodeError, OSError):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(entry.path)
             return 1
@@ -491,7 +491,7 @@ class Mailbox:
                             changed = True
                         if changed:
                             _atomic_write_message(Path(entry.path), data)
-                    except json.JSONDecodeError, OSError, FileNotFoundError:
+                    except (json.JSONDecodeError, OSError, FileNotFoundError):
                         continue
 
     def prune_dead(self, live_ids: set[str]) -> int:
@@ -561,7 +561,7 @@ class Mailbox:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-        except json.JSONDecodeError, OSError, FileNotFoundError:
+        except (json.JSONDecodeError, OSError, FileNotFoundError):
             return None
         msg = Message.from_dict(data)
         if msg.status != "pending" or msg.delivered_at is not None:
@@ -584,7 +584,7 @@ class Mailbox:
         try:
             with open(msg_path, encoding="utf-8") as f:
                 data = json.load(f)
-        except json.JSONDecodeError, OSError:
+        except (json.JSONDecodeError, OSError):
             return None, None
         return Message.from_dict(data), msg_path
 

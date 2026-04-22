@@ -69,7 +69,7 @@ def _read_proc_environ(pid: int) -> bytes | None:
     try:
         with open(f"/proc/{pid}/environ", "rb") as fh:
             return fh.read()
-    except FileNotFoundError, PermissionError, ProcessLookupError, OSError:
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
         return None
 
 
@@ -82,7 +82,7 @@ def _get_child_pids(pid: int) -> list[int]:
                 continue
             try:
                 content = (entry / "status").read_text()
-            except FileNotFoundError, PermissionError, OSError:
+            except (FileNotFoundError, PermissionError, OSError):
                 continue
             for line in content.splitlines():
                 if line.startswith("PPid:"):

@@ -78,7 +78,7 @@ def get_current_model(transcript_path: str) -> str | None:
                 continue
             try:
                 entry = json.loads(line)
-            except json.JSONDecodeError, ValueError:
+            except (json.JSONDecodeError, ValueError):
                 continue
             if not isinstance(entry, dict):
                 continue
@@ -87,6 +87,6 @@ def get_current_model(transcript_path: str) -> str | None:
             raw_model = _extract_model_from_entry(entry)
             if raw_model:
                 return _normalise_model(raw_model)
-    except OSError, ValueError:
+    except (OSError, ValueError):
         pass
     return None

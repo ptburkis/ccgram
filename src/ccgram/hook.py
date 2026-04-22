@@ -571,6 +571,20 @@ def _write_pty_marker(
         logger.debug("_write_pty_marker failed", exc_info=True)
 
 
+def _existing_entry_is_live(session_map: dict, key: str, incoming_sid: str) -> bool:
+    """Return True if session_map[key] has a DIFFERENT session_id that is still alive (PTY marker present)."""
+    existing = session_map.get(key)
+    if not existing or existing.get("session_id") == incoming_sid:
+        return False
+    try:
+        from .pty_markers import read_marker_for_window
+        wid = key.rsplit(":", 1)[-1] if ":" in key else key
+        marker = read_marker_for_window(wid)
+        return bool(marker and marker.get("session_id") == existing["session_id"])
+    except Exception:
+        return False
+
+
 def _update_session_map(
     session_window_key: str,
     session_id: str,
@@ -619,6 +633,10 @@ def _update_session_map(
                     except OSError:
                         logger.warning("Failed to read session_map.json")
 
+                if _existing_entry_is_live(session_map, session_window_key, session_id):
+                    logger.debug("session_map: skipping overwrite of %s — existing entry is live", session_window_key)
+                    return
+
                 session_map[session_window_key] = {
                     "session_id": session_id,
                     "cwd": cwd,
@@ -644,6 +662,22 @@ def _update_session_map(
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
     except OSError:
         logger.exception("Failed to write session_map")
+
+
+def _is_subagent_hook(payload: dict, window_id: str) -> bool:
+    """True if this hook came from a Task subagent rather than the primary session."""
+    if payload.get("parent_session_id"):
+        return True
+    tp = payload.get("transcript_path", "")
+    if tp and "agents" in Path(tp).parts:
+        return True
+    try:
+        sess = os.environ.get("TMUX_SESSION_NAME") or "ccgram"
+        r = subprocess.run(["tmux", "display-message", "-t", f"{sess}:{window_id}", "-p", "#{pane_pid}"],
+                           capture_output=True, text=True, timeout=2)
+        return r.returncode == 0 and os.getppid() != int(r.stdout.strip())
+    except Exception:
+        return False
 
 
 def _process_hook_stdin() -> None:
@@ -702,14 +736,15 @@ def _process_hook_stdin() -> None:
     # SessionStart: update session_map.json AND write event
     if event == "SessionStart":
         tmux_session_name = session_window_key.rsplit(":", 1)[0]
-        _update_session_map(
-            session_window_key,
-            session_id,
-            cwd,
-            window_name,
-            transcript_path,
-            tmux_session_name,
-        )
+        if not _is_subagent_hook(payload, window_id):
+            _update_session_map(
+                session_window_key,
+                session_id,
+                cwd,
+                window_name,
+                transcript_path,
+                tmux_session_name,
+            )
         _write_event(
             event,
             session_id,
