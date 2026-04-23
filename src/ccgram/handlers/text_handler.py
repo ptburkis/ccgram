@@ -343,7 +343,46 @@ async def _forward_message(
     except Exception:
         logger.debug("auto-heal failed for %s, continuing", window_id, exc_info=True)
 
-    success, err_message = await send_to_window(window_id, text)
+    # Build message with reply/forward context
+    parts = []
+
+    if message.reply_to_message:
+        reply = message.reply_to_message
+        # Filter out forum topic root messages (reply_to_message_id == thread_id means
+        # the user just posted in the thread, not replied to a specific message)
+        if reply.message_id != thread_id:
+            if reply.text:
+                quoted = reply.text[:500] + ("..." if len(reply.text) > 500 else "")
+                parts.append(f'[Quoting: "{quoted}"]')
+            elif reply.caption:
+                parts.append(f'[Quoting image: "{reply.caption[:200]}"]')
+            elif reply.photo:
+                parts.append('[Quoting: an image]')
+            elif reply.document:
+                parts.append(f'[Quoting: document {reply.document.file_name or ""}]')
+
+    if message.forward_date and not message.reply_to_message:
+        forward_from = ""
+        if message.forward_from:
+            forward_from = f" from {message.forward_from.first_name}"
+        elif message.forward_sender_name:
+            forward_from = f" from {message.forward_sender_name}"
+        elif message.forward_from_chat:
+            forward_from = f" from {message.forward_from_chat.title}"
+        elif hasattr(message, "forward_origin") and message.forward_origin:
+            origin = message.forward_origin
+            if hasattr(origin, "sender_user") and origin.sender_user:
+                forward_from = f" from {origin.sender_user.first_name}"
+            elif hasattr(origin, "sender_user_name") and origin.sender_user_name:
+                forward_from = f" from {origin.sender_user_name}"
+            elif hasattr(origin, "chat") and origin.chat:
+                forward_from = f" from {origin.chat.title}"
+        parts.append(f'[Forwarded message{forward_from}]')
+
+    parts.append(text)
+    full_text = "\n".join(parts)
+
+    success, err_message = await send_to_window(window_id, full_text)
     if not success:
         await safe_reply(message, f"\u274c {err_message}")
         return
@@ -352,7 +391,7 @@ async def _forward_message(
 
     from .command_history import record_command
 
-    record_command(user_id, thread_id, text)
+    record_command(user_id, thread_id, full_text)
 
     # Start background capture for ! bash command output
     if text.startswith("!") and len(text) > 1:
