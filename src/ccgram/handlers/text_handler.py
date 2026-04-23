@@ -361,13 +361,13 @@ async def _forward_message(
             elif reply.document:
                 parts.append(f'[Quoting: document {reply.document.file_name or ""}]')
 
-    if message.forward_date and not message.reply_to_message:
+    if getattr(message, 'forward_origin', None) and not message.reply_to_message:
         forward_from = ""
-        if message.forward_from:
+        if getattr(message, 'forward_from', None):
             forward_from = f" from {message.forward_from.first_name}"
-        elif message.forward_sender_name:
+        elif getattr(message, 'forward_sender_name', None):
             forward_from = f" from {message.forward_sender_name}"
-        elif message.forward_from_chat:
+        elif getattr(message, 'forward_from_chat', None):
             forward_from = f" from {message.forward_from_chat.title}"
         elif hasattr(message, "forward_origin") and message.forward_origin:
             origin = message.forward_origin
