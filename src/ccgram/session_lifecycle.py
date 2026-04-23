@@ -849,12 +849,18 @@ def build_default_deps(  # noqa: C901 — adapter factory with N thin closures
             )
 
     async def _verify_topic(group_id: int, topic_id: int) -> tuple[bool, str]:
-        topics = await mtproto_client.get_forum_topics_by_id(  # type: ignore[attr-defined]
-            group_id, [topic_id]
-        )
-        for t in topics:
-            if t.topic_id == topic_id:
-                return True, t.title
+        try:
+            if mtproto_client is None:
+                return True, ""  # assume topic exists if MTProto unavailable
+            topics = await mtproto_client.get_forum_topics_by_id(  # type: ignore[attr-defined]
+                group_id, [topic_id]
+            )
+            for t in topics:
+                if t.topic_id == topic_id:
+                    return True, t.title
+        except Exception:
+            logger.debug("_verify_topic: MTProto failed, assuming topic exists")
+            return True, ""
         return False, ""
 
     async def _tmux_create(cwd: str, window_name: str) -> str:
