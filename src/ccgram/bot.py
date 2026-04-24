@@ -41,6 +41,7 @@ from telegram.ext import (
     ContextTypes,
     InlineQueryHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -97,6 +98,7 @@ from .handlers.message_queue import (
 from .handlers.message_sender import safe_reply
 from .handlers.response_builder import build_response_parts
 from .handlers.polling_coordinator import status_poll_loop, _strip_effort_suffix
+from .handlers.polling_watchdog import record_inbound as _record_inbound
 from .handlers.file_handler import handle_document_message, handle_photo_message
 from .handlers.forum_topic_created import (
     forum_topic_created_handler as _forum_topic_created_handler,
@@ -1460,6 +1462,13 @@ def create_bot() -> Application:
     )
 
     application.add_error_handler(_error_handler)
+
+    # Polling watchdog: catch every inbound update (group -1 = before all handlers)
+    async def _watchdog_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        _record_inbound()
+
+    application.add_handler(TypeHandler(Update, _watchdog_update_handler), group=-1)
+
     application.add_handler(CommandHandler("new", new_command, filters=_group_filter))
     application.add_handler(
         CommandHandler("start", new_command, filters=_group_filter)  # compat alias

@@ -32,6 +32,7 @@ from ..thread_router import thread_router
 from ..tmux_manager import tmux_manager
 from ..utils import log_throttled
 from .cleanup import clear_topic_state
+from .polling_watchdog import check_watchdog as _check_watchdog
 from .interactive_ui import (
     clear_interactive_mode,
     clear_interactive_msg,
@@ -1242,6 +1243,10 @@ async def status_poll_loop(bot: Bot) -> None:
             if now - _last_sync_check >= _SYNC_CHECK_INTERVAL:
                 _last_sync_check = now
                 await _run_periodic_sync_check(bot)
+
+            # In-process polling watchdog — exits if no inbound Telegram
+            # updates for CCGRAM_WATCHDOG_TIMEOUT seconds (default 600s).
+            await _check_watchdog()
 
         except _LoopError:
             logger.exception("Status poll loop error")
