@@ -181,18 +181,45 @@ def _update_session_map_sync(
                 session_map[window_key] = entry
                 atomic_write_json(map_file, session_map)
 
-                # Keep topic_binding session_id in sync with rotation.
+                # Keep topic_binding session_id AND sessions.window_id in sync.
+                # Bug: upsert_session() has a no-steal guard that refuses to set
+                # window_id on new_sid while old_sid still owns it (status=active).
+                # Fix: within this lock, release window_id from old_sid first, then
+                # upsert new_sid with correct window_id so the dashboard join
+                # (topic_bindings.session_id -> sessions.window_id) returns non-NULL.
                 try:
-                    import sqlite3
-                    db_path = Path.home() / ".ccgram" / "state.db"
-                    if db_path.exists():
-                        db_conn = sqlite3.connect(str(db_path))
-                        db_conn.execute(
+                    import sqlite3 as _sq3
+                    import time as _t
+                    _db = Path.home() / ".ccgram" / "state.db"
+                    if _db.exists():
+                        _c = _sq3.connect(str(_db))
+                        _now = int(_t.time())
+                        # 1. Rebind topic.
+                        _c.execute(
                             "UPDATE topic_bindings SET session_id=? WHERE window_id=?",
                             (new_sid, window_id),
                         )
-                        db_conn.commit()
-                        db_conn.close()
+                        # 2. Release window_id from old session so upsert_session()
+                        #    no-steal guard does not block _handle_session_start.
+                        if old_sid:
+                            _c.execute(
+                                "UPDATE sessions SET window_id=NULL, updated_at=?"
+                                " WHERE session_id=? AND window_id=?",
+                                (_now, old_sid, window_id),
+                            )
+                        # 3. Ensure new session row has correct window_id.
+                        _c.execute(
+                            "INSERT INTO sessions"
+                            " (session_id,cwd,agent,mode,status,window_id,created_at,updated_at)"
+                            " VALUES(?,?,'claude',NULL,'active',?,?,?)"
+                            " ON CONFLICT(session_id) DO UPDATE SET"
+                            " window_id=CASE WHEN excluded.window_id IS NOT NULL"
+                            " THEN excluded.window_id ELSE window_id END,"
+                            " status='active',updated_at=excluded.updated_at",
+                            (new_sid, entry.get("cwd", "/"), window_id, _now, _now),
+                        )
+                        _c.commit()
+                        _c.close()
                 except Exception:
                     pass
             finally:

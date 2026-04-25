@@ -493,3 +493,201 @@ class TestLegacyWindowAmbiguous:
         # Warning is emitted via structlog to stdout — verify it was produced.
         captured = capsys.readouterr()
         assert "ambiguous" in captured.out.lower()
+
+
+# ─── 5. _update_session_map_sync: sessions.window_id stays in sync ────────────
+
+
+class TestSessionBindingSync:
+    """Tests that _update_session_map_sync keeps sessions.window_id consistent.
+
+    The bug: after session rotation, topic_bindings.session_id points to new_sid
+    but sessions[new_sid].window_id is NULL, so the dashboard join returns NULL.
+    These tests exercise _update_session_map_sync directly (bypassing the
+    SessionStart hook's Guard A which skips stale tmux events in tests).
+    """
+
+    OLD_SID = "old-sync-0000-0000-0000-000000000000"
+    NEW_SID = "new-sync-1111-1111-1111-111111111111"
+    WINDOW_ID = "@19"
+    CWD = "/home/peter/projects/james"
+    GROUP_ID = -1003568873755
+    TOPIC_ID = 10607
+
+    @pytest.fixture()
+    def autoheal_db(self, tmp_path, monkeypatch):
+        """Redirect _update_session_map_sync to use a tmp DB via Path.home() patch."""
+        import ccgram.session_autoheal as _ah
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        ccgram_dir = fake_home / ".ccgram"
+        ccgram_dir.mkdir()
+
+        # Patch Path.home() inside the session_autoheal module.
+        monkeypatch.setattr(_ah.Path, "home", staticmethod(lambda: fake_home))
+
+        # Init the DB schema at the patched location.
+        from ccgram.store import init_db
+        db_path = ccgram_dir / "state.db"
+        init_db(db_path)
+
+        return db_path
+
+    def _seed_db(self, db_path):
+        """Insert old_sid session + topic_binding rows."""
+        import sqlite3
+        import time
+        now = int(time.time())
+        c = sqlite3.connect(str(db_path))
+        c.execute(
+            "INSERT INTO sessions"
+            " (session_id,cwd,agent,mode,status,window_id,created_at,updated_at)"
+            " VALUES(?,?,'claude',NULL,'active',?,?,?)",
+            (self.OLD_SID, self.CWD, self.WINDOW_ID, now, now),
+        )
+        c.execute(
+            "INSERT INTO topic_bindings"
+            " (group_id,topic_id,session_id,topic_title,bound_at,user_id,window_id)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (self.GROUP_ID, self.TOPIC_ID, self.OLD_SID, "james-claude-hub", now, 1, self.WINDOW_ID),
+        )
+        c.commit()
+        c.close()
+
+    def _read_db(self, db_path):
+        import sqlite3
+        c = sqlite3.connect(str(db_path))
+        c.row_factory = sqlite3.Row
+        binding = c.execute(
+            "SELECT * FROM topic_bindings WHERE topic_id=?", (self.TOPIC_ID,)
+        ).fetchone()
+        old_sess = c.execute(
+            "SELECT * FROM sessions WHERE session_id=?", (self.OLD_SID,)
+        ).fetchone()
+        new_sess = c.execute(
+            "SELECT * FROM sessions WHERE session_id=?", (self.NEW_SID,)
+        ).fetchone()
+        # Dashboard join: topic_bindings -> sessions
+        dashboard_row = c.execute(
+            "SELECT s.window_id FROM topic_bindings tb"
+            " JOIN sessions s ON s.session_id = tb.session_id"
+            " WHERE tb.topic_id=?",
+            (self.TOPIC_ID,),
+        ).fetchone()
+        c.close()
+        return (
+            dict(binding) if binding else None,
+            dict(old_sess) if old_sess else None,
+            dict(new_sess) if new_sess else None,
+            dict(dashboard_row) if dashboard_row else None,
+        )
+
+    def test_topic_binding_repointed(self, autoheal_db, ccgram_dir):
+        self._seed_db(autoheal_db)
+        _write_session_map(
+            ccgram_dir / "session_map.json",
+            {f"ccgram:{self.WINDOW_ID}": {
+                "session_id": self.OLD_SID, "cwd": self.CWD,
+                "window_name": "james-claude-hub", "provider_name": "claude",
+            }},
+        )
+        from ccgram.session_autoheal import _update_session_map_sync
+        ok = _update_session_map_sync(
+            self.WINDOW_ID, self.OLD_SID, self.NEW_SID, f".../{self.NEW_SID}.jsonl"
+        )
+        assert ok
+        binding, _, _, _ = self._read_db(autoheal_db)
+        assert binding is not None
+        assert binding["session_id"] == self.NEW_SID
+
+    def test_old_session_releases_window_id(self, autoheal_db, ccgram_dir):
+        self._seed_db(autoheal_db)
+        _write_session_map(
+            ccgram_dir / "session_map.json",
+            {f"ccgram:{self.WINDOW_ID}": {
+                "session_id": self.OLD_SID, "cwd": self.CWD,
+                "window_name": "james-claude-hub", "provider_name": "claude",
+            }},
+        )
+        from ccgram.session_autoheal import _update_session_map_sync
+        _update_session_map_sync(
+            self.WINDOW_ID, self.OLD_SID, self.NEW_SID, f".../{self.NEW_SID}.jsonl"
+        )
+        _, old_sess, _, _ = self._read_db(autoheal_db)
+        assert old_sess is not None
+        assert old_sess["window_id"] is None, (
+            f"old session should have released window_id, got {old_sess['window_id']!r}"
+        )
+
+    def test_new_session_gets_window_id(self, autoheal_db, ccgram_dir):
+        self._seed_db(autoheal_db)
+        _write_session_map(
+            ccgram_dir / "session_map.json",
+            {f"ccgram:{self.WINDOW_ID}": {
+                "session_id": self.OLD_SID, "cwd": self.CWD,
+                "window_name": "james-claude-hub", "provider_name": "claude",
+            }},
+        )
+        from ccgram.session_autoheal import _update_session_map_sync
+        _update_session_map_sync(
+            self.WINDOW_ID, self.OLD_SID, self.NEW_SID, f".../{self.NEW_SID}.jsonl"
+        )
+        _, _, new_sess, _ = self._read_db(autoheal_db)
+        assert new_sess is not None, "new session row should exist after rotation"
+        assert new_sess["window_id"] == self.WINDOW_ID, (
+            f"new session should own window_id={self.WINDOW_ID!r}, got {new_sess['window_id']!r}"
+        )
+
+    def test_dashboard_join_returns_window_id(self, autoheal_db, ccgram_dir):
+        """The critical regression test: dashboard join must not return NULL."""
+        self._seed_db(autoheal_db)
+        _write_session_map(
+            ccgram_dir / "session_map.json",
+            {f"ccgram:{self.WINDOW_ID}": {
+                "session_id": self.OLD_SID, "cwd": self.CWD,
+                "window_name": "james-claude-hub", "provider_name": "claude",
+            }},
+        )
+        from ccgram.session_autoheal import _update_session_map_sync
+        _update_session_map_sync(
+            self.WINDOW_ID, self.OLD_SID, self.NEW_SID, f".../{self.NEW_SID}.jsonl"
+        )
+        _, _, _, dashboard = self._read_db(autoheal_db)
+        assert dashboard is not None, "dashboard join returned no row"
+        assert dashboard["window_id"] == self.WINDOW_ID, (
+            f"Dashboard join should return window_id={self.WINDOW_ID!r}, "
+            f"got {dashboard['window_id']!r}. This is the regression test for the "
+            "session-binding drift bug."
+        )
+
+    def test_fix_existing_null_window_id_row(self, autoheal_db, ccgram_dir):
+        """If new_sid row was already created with window_id=NULL (by upsert_session
+        no-steal guard firing first), _update_session_map_sync must fix it."""
+        import sqlite3, time
+        self._seed_db(autoheal_db)
+        now = int(time.time())
+        # Simulate upsert_session inserting new_sid with window_id=NULL
+        c = sqlite3.connect(str(autoheal_db))
+        c.execute(
+            "INSERT INTO sessions"
+            " (session_id,cwd,agent,mode,status,window_id,created_at,updated_at)"
+            " VALUES(?,?,'claude',NULL,'active',NULL,?,?)",
+            (self.NEW_SID, self.CWD, now, now),
+        )
+        c.commit()
+        c.close()
+        _write_session_map(
+            ccgram_dir / "session_map.json",
+            {f"ccgram:{self.WINDOW_ID}": {
+                "session_id": self.OLD_SID, "cwd": self.CWD,
+                "window_name": "james-claude-hub", "provider_name": "claude",
+            }},
+        )
+        from ccgram.session_autoheal import _update_session_map_sync
+        _update_session_map_sync(
+            self.WINDOW_ID, self.OLD_SID, self.NEW_SID, f".../{self.NEW_SID}.jsonl"
+        )
+        _, _, new_sess, dashboard = self._read_db(autoheal_db)
+        assert new_sess["window_id"] == self.WINDOW_ID
+        assert dashboard is not None and dashboard["window_id"] == self.WINDOW_ID
