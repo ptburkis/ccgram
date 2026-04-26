@@ -4,7 +4,7 @@ dynamic = ["version"]
 description = "CCGram — manage AI coding agents from Telegram via tmux"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 authors = [
     { name = "Alexei Ledenev", email = "alexei.led@gmail.com" },
 ]
@@ -13,6 +13,8 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Communications :: Chat",
     "Topic :: Software Development",

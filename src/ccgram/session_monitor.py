@@ -1265,6 +1265,19 @@ class SessionMonitor:
             if uid is None or wid is None:
                 continue
             desired.setdefault(uid, {})[b.topic_id] = wid
+        # Multi-user: replicate desired bindings for all allowed users
+        from .config import config as _cfg
+        all_uids = set(desired.keys())
+        for _au in getattr(_cfg, "allowed_users", set()):
+            if isinstance(_au, int):
+                all_uids.add(_au)
+        all_topic_bindings = {}
+        for _d in desired.values():
+            all_topic_bindings.update(_d)
+        if all_topic_bindings:
+            for _au in all_uids:
+                desired.setdefault(_au, {}).update(all_topic_bindings)
+
         for uid, topics in desired.items():
             for tid, wid in topics.items():
                 current = _tr.thread_bindings.get(uid, {}).get(tid)

@@ -258,6 +258,39 @@ def doctor_cmd(fix: bool) -> None:
     doctor_main(fix=fix)
 
 
+# --- spawn command ---------------------------------------------------------
+
+
+@cli.command("spawn")
+@click.argument("window_name")
+@click.option("--cwd", default=None, help="Working directory (default: ~/projects/<name>).")
+@click.option("--provider", default="claude", type=click.Choice(["claude", "codex"]), help="Agent provider.")
+@click.option("--topic-id", default=None, type=int, help="Reuse existing topic ID.")
+@click.option("--no-verify", is_flag=True, help="Skip outbound verification.")
+def spawn_cmd(window_name: str, cwd: str | None, provider: str, topic_id: int | None, no_verify: bool) -> None:
+    """Bootstrap a new session with verification and self-healing."""
+    import asyncio
+    from pathlib import Path
+    from .bootstrap import BootstrapResult, bootstrap_session, ensure_provider_settings
+
+    ensure_provider_settings()
+    if cwd is None:
+        cwd = str(Path.home() / "projects" / window_name)
+
+    result: BootstrapResult = asyncio.run(bootstrap_session(
+        window_name=window_name, cwd=cwd, provider=provider,
+        topic_id=topic_id, verify=not no_verify,
+    ))
+
+    if result.success:
+        click.echo(f"✅ {window_name} bootstrapped: topic={result.topic_id} window={result.window_id}")
+        if result.healed:
+            click.echo(f"🔧 Self-healed: {', '.join(result.healed)}")
+    else:
+        click.echo(f"❌ Bootstrap failed: {'; '.join(result.errors)}")
+        raise SystemExit(1)
+
+
 # --- sync-check command ----------------------------------------------------
 
 

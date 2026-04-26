@@ -291,6 +291,20 @@ class SessionManager:
                 continue
             tb.setdefault(user_id, {})[b.topic_id] = wid
 
+        # Multi-user support: replicate bindings for all allowed users
+        # so any user in ALLOWED_USERS can message any bound topic.
+        from .config import config
+        all_user_ids = set(tb.keys())
+        for uid in getattr(config, "allowed_users", set()):
+            if isinstance(uid, int):
+                all_user_ids.add(uid)
+        all_bindings = {}
+        for uid_bindings in tb.values():
+            all_bindings.update(uid_bindings)
+        if all_bindings:
+            for uid in all_user_ids:
+                tb.setdefault(uid, {}).update(all_bindings)
+
         # Recover window display names from "window" scope prefs.
         # Each row: (scope_id=window_id, key="display_name", value=name)
         window_display_names: dict[str, str] = {}

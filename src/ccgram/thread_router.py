@@ -298,8 +298,8 @@ class ThreadRouter:
 
     def iter_thread_bindings(self) -> Iterator[tuple[int, int, str]]:
         """Iterate all thread bindings as (user_id, thread_id, window_id)."""
-        for user_id, bindings in self.thread_bindings.items():
-            for thread_id, window_id in bindings.items():
+        for user_id, bindings in list(self.thread_bindings.items()):
+            for thread_id, window_id in list(bindings.items()):
                 yield user_id, thread_id, window_id
 
     # ------------------------------------------------------------------
