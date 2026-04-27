@@ -105,8 +105,14 @@ async def _heal_stuck_prompts(window_id: str) -> list[str]:
             capture_output=True, timeout=5,
         )
         healed.append("bypass_prompt")
-    elif "rate limit" in pane or "/upgrade" in pane:
-        log.warning("bootstrap.rate_limit_detected", window_id=window_id)
+    elif "rate limit" in pane or "/upgrade" in pane or "Stop and wait" in pane:
+        log.warning("bootstrap.rate_limit_cleared", window_id=window_id)
+        await asyncio.to_thread(
+            subprocess.run,
+            ["tmux", "send-keys", "-t", f"{_TMUX}:{window_id}", "Enter"],
+            capture_output=True, timeout=5,
+        )
+        healed.append("rate_limit_prompt")
 
     return healed
 
