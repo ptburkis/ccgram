@@ -1072,6 +1072,7 @@ async def _clear_stale_bg_indicators(bot: Bot) -> None:
 async def _run_periodic_sync_check(bot: Bot) -> None:
     """Run sync-check and auto-fix any drift. Runs every _SYNC_CHECK_INTERVAL seconds."""
     try:
+        from ..config import config
         from ..sync_check import run_sync_check
 
         report = await asyncio.to_thread(run_sync_check, False)
