@@ -299,7 +299,7 @@ async def update_topic_emoji(
             notif_mode = session_manager.get_notification_mode(window_id_for_thread)
             if notif_mode != "all":
                 return
-    except ImportError, AttributeError:
+    except (ImportError, AttributeError):
         # If lookup fails for any reason, fall through and update normally.
         pass
 

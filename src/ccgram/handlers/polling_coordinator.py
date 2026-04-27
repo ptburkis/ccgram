@@ -160,7 +160,7 @@ def _load_bg_work_state() -> None:
 
         if _BG_WORK_STATE_FILE.exists():
             _bg_work_shown = json.loads(_BG_WORK_STATE_FILE.read_text())
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         pass
 
 
@@ -180,7 +180,7 @@ def _load_effort_state() -> None:
 
         if _EFFORT_STATE_FILE.exists():
             _effort_shown = json.loads(_EFFORT_STATE_FILE.read_text())
-    except OSError, ValueError:
+    except (OSError, ValueError):
         pass
 
 
