@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
 
 import structlog
@@ -92,19 +93,68 @@ async def fire_cron(
 
 
 async def _default_send_keys(target: str, message: str) -> None:
-    """Send *message* to *target* pane via tmux send-keys subprocess."""
+    """Send *message* to *target* pane via atomic paste-buffer to avoid TUI race."""
+    buf_name = f"ccgram-cron-{os.getpid()}"
+
+    # Step 1: load message into a named tmux buffer atomically via stdin
     proc = await asyncio.create_subprocess_exec(
-        "tmux",
-        "send-keys",
-        "-t",
-        target,
-        message,
-        "Enter",
+        "tmux", "load-buffer", "-b", buf_name, "-",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate(input=message.encode())
+    if proc.returncode != 0:
+        raise RuntimeError(f"tmux load-buffer failed (rc={proc.returncode}): {stderr.decode()[:200]}")
+
+    # Step 2: paste buffer into pane; -d deletes the buffer after paste
+    proc = await asyncio.create_subprocess_exec(
+        "tmux", "paste-buffer", "-t", target, "-b", buf_name, "-d",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"tmux send-keys failed (rc={proc.returncode}): {stderr.decode()[:200]}"
+        raise RuntimeError(f"tmux paste-buffer failed (rc={proc.returncode}): {stderr.decode()[:200]}")
+
+    # Step 3: let the TUI input widget consume the pasted text
+    await asyncio.sleep(0.3)
+
+    # Step 4: send Enter to submit
+    proc = await asyncio.create_subprocess_exec(
+        "tmux", "send-keys", "-t", target, "Enter",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"tmux send-keys failed (rc={proc.returncode}): {stderr.decode()[:200]}")
+
+    # Step 5: wait for the submit to land
+    await asyncio.sleep(0.7)
+
+    # Step 6: capture last 30 lines to verify submission
+    proc = await asyncio.create_subprocess_exec(
+        "tmux", "capture-pane", "-t", target, "-p", "-S", "-30",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"tmux capture-pane failed (rc={proc.returncode}): {stderr.decode()[:200]}")
+
+    # Step 7: if first line of message still appears after the last \u2500\u2500\u2500 separator,
+    # it's still sitting in the input area \u2014 retry Enter once (best-effort, no raise)
+    pane_text = stdout.decode(errors="replace")
+    lines = message.splitlines()
+    first_line = lines[0][:60] if lines else ""
+    sep = "\u2500\u2500\u2500"
+    sep_pos = pane_text.rfind(sep)
+    after_sep = pane_text[sep_pos:] if sep_pos != -1 else ""
+    if first_line and first_line in after_sep:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "send-keys", "-t", target, "Enter",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        await proc.communicate()
