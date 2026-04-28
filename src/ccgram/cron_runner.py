@@ -93,29 +93,35 @@ async def fire_cron(
 
 
 async def _default_send_keys(target: str, message: str) -> None:
-    """Submit *message* to a Claude Code TUI pane.
+    """Submit *message* to a Claude Code TUI pane via bracketed paste."""
+    buf_name = f"ccgram-cron-{os.getpid()}"
 
-    Uses the same proven pattern as `claude-hub send`: one send-keys call
-    with body + Enter, then a second Enter 0.5s later if the message is
-    multi-line (Claude Code's TUI requires a confirm-Enter after a
-    multi-line paste).
-    """
     proc = await asyncio.create_subprocess_exec(
-        "tmux", "send-keys", "-t", target, message, "Enter",
+        "tmux", "load-buffer", "-b", buf_name, "-",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate(input=message.encode())
+    if proc.returncode != 0:
+        raise RuntimeError(f"tmux load-buffer failed (rc={proc.returncode}): {stderr.decode()[:200]}")
+
+    proc = await asyncio.create_subprocess_exec(
+        "tmux", "paste-buffer", "-t", target, "-b", buf_name, "-p", "-d",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"tmux send-keys failed (rc={proc.returncode}): {stderr.decode()[:200]}"
-        )
+        raise RuntimeError(f"tmux paste-buffer failed (rc={proc.returncode}): {stderr.decode()[:200]}")
 
-    if "\n" in message:
-        await asyncio.sleep(0.5)
-        proc = await asyncio.create_subprocess_exec(
-            "tmux", "send-keys", "-t", target, "Enter",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
+    await asyncio.sleep(0.4)
+
+    proc = await asyncio.create_subprocess_exec(
+        "tmux", "send-keys", "-t", target, "Enter",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"tmux send-keys failed (rc={proc.returncode}): {stderr.decode()[:200]}")

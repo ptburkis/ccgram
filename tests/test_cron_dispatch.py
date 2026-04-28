@@ -145,25 +145,27 @@ class TestFireCronNoTarget:
 
 
 class TestDefaultSendKeys:
-    """Single-line: one send-keys. Multi-line: send-keys + 0.5s + Enter."""
+    """Bracketed-paste path: load-buffer -> paste-buffer -p -d -> Enter."""
 
     @staticmethod
-    def _proc():
+    def _proc(returncode=0):
         from unittest.mock import AsyncMock
         p = AsyncMock()
         p.communicate = AsyncMock(return_value=(b"", b""))
-        p.returncode = 0
+        p.returncode = returncode
         return p
 
-    def test_single_line_one_call(self):
+    def test_calls_load_then_paste_then_enter(self):
+        """Single-line message: load-buffer, paste-buffer -p -d, send-keys Enter."""
         from unittest.mock import patch, AsyncMock
         from ccgram.cron_runner import _default_send_keys
 
-        calls = []
+        procs = []
 
         async def fake_exec(*args, **kwargs):
-            calls.append(args)
-            return self._proc()
+            p = self._proc()
+            procs.append((args, kwargs, p))
+            return p
 
         with (
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
@@ -171,25 +173,50 @@ class TestDefaultSendKeys:
         ):
             asyncio.run(_default_send_keys("ccgram:@1", "hello"))
 
-        assert len(calls) == 1
-        assert calls[0] == ("tmux", "send-keys", "-t", "ccgram:@1", "hello", "Enter")
+        assert len(procs) == 3
 
-    def test_multi_line_sends_confirm_enter(self):
+        load_args, load_kwargs, load_proc = procs[0]
+        assert load_args[:2] == ("tmux", "load-buffer")
+        assert load_args[2] == "-b"
+        buf_name = load_args[3]
+        assert buf_name.startswith("ccgram-cron-")
+        assert load_args[4] == "-"
+        assert load_kwargs.get("stdin") == asyncio.subprocess.PIPE
+        load_proc.communicate.assert_awaited_once_with(input=b"hello")
+
+        paste_args, _, _ = procs[1]
+        assert paste_args == ("tmux", "paste-buffer", "-t", "ccgram:@1", "-b", buf_name, "-p", "-d")
+
+        enter_args, _, _ = procs[2]
+        assert enter_args == ("tmux", "send-keys", "-t", "ccgram:@1", "Enter")
+
+    def test_multi_line_uses_same_path(self):
+        """Multi-line message uses the same 3-step sequence, no extra Enter."""
         from unittest.mock import patch, AsyncMock
         from ccgram.cron_runner import _default_send_keys
 
-        calls = []
+        procs = []
 
         async def fake_exec(*args, **kwargs):
-            calls.append(args)
-            return self._proc()
+            p = self._proc()
+            procs.append((args, kwargs, p))
+            return p
 
         with (
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
-            asyncio.run(_default_send_keys("ccgram:@1", "line1\nline2"))
+            asyncio.run(_default_send_keys("ccgram:@1", "line1\nline2\nline3"))
 
-        assert len(calls) == 2
-        assert calls[0] == ("tmux", "send-keys", "-t", "ccgram:@1", "line1\nline2", "Enter")
-        assert calls[1] == ("tmux", "send-keys", "-t", "ccgram:@1", "Enter")
+        assert len(procs) == 3
+
+        load_args, load_kwargs, load_proc = procs[0]
+        buf_name = load_args[3]
+        assert buf_name.startswith("ccgram-cron-")
+        load_proc.communicate.assert_awaited_once_with(input=b"line1\nline2\nline3")
+
+        paste_args, _, _ = procs[1]
+        assert paste_args == ("tmux", "paste-buffer", "-t", "ccgram:@1", "-b", buf_name, "-p", "-d")
+
+        enter_args, _, _ = procs[2]
+        assert enter_args == ("tmux", "send-keys", "-t", "ccgram:@1", "Enter")
