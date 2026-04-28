@@ -109,7 +109,7 @@ async def _heal_stuck_prompts(window_id: str) -> list[str]:
         log.warning("bootstrap.rate_limit_cleared", window_id=window_id)
         await asyncio.to_thread(
             subprocess.run,
-            ["tmux", "send-keys", "-t", f"{_TMUX}:{window_id}", "Enter"],
+            ["tmux", "send-keys", "-t", f"ccgram:{window_id}", "Enter"],
             capture_output=True, timeout=5,
         )
         healed.append("rate_limit_prompt")

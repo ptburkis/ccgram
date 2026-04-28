@@ -66,6 +66,7 @@ class WindowState:
     approval_mode: str = DEFAULT_APPROVAL_MODE
     batch_mode: str = DEFAULT_BATCH_MODE
     external: bool = False
+    origin: str = "manual_discovered"  # manual_discovered | ccgram_created | external
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {

@@ -146,8 +146,8 @@ async def test_heal_stuck_prompts_rate_limit():
     with patch("ccgram.bootstrap.subprocess.run", side_effect=fake_run):
         healed = await _heal_stuck_prompts("@8")
 
-    assert healed == []
-    assert send_args == []
+    assert "rate_limit_prompt" in healed
+    assert len(send_args) == 1  # sends Enter to clear the prompt
 
 
 # ---------------------------------------------------------------------------
