@@ -145,82 +145,51 @@ class TestFireCronNoTarget:
 
 
 class TestDefaultSendKeys:
-    """Bulletproof tmux submission: load-buffer → paste-buffer → send-keys → capture-pane → optional retry."""
+    """Single-line: one send-keys. Multi-line: send-keys + 0.5s + Enter."""
 
     @staticmethod
-    def _proc(stdout=b""):
+    def _proc():
         from unittest.mock import AsyncMock
         p = AsyncMock()
-        p.communicate = AsyncMock(return_value=(stdout, b""))
+        p.communicate = AsyncMock(return_value=(b"", b""))
         p.returncode = 0
         return p
 
-    @staticmethod
-    def _run(coro):
-        return asyncio.run(coro)
-
-    def test_basic_sequence(self):
-        """Verifies the subcommand order: load-buffer, paste-buffer, send-keys, capture-pane."""
+    def test_single_line_one_call(self):
         from unittest.mock import patch, AsyncMock
         from ccgram.cron_runner import _default_send_keys
 
-        subcommands = []
+        calls = []
 
         async def fake_exec(*args, **kwargs):
-            subcommands.append(args[1])
+            calls.append(args)
             return self._proc()
 
         with (
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
-            self._run(_default_send_keys("ccgram:@1", "hello"))
+            asyncio.run(_default_send_keys("ccgram:@1", "hello"))
 
-        assert subcommands == ["load-buffer", "paste-buffer", "send-keys", "capture-pane"]
+        assert len(calls) == 1
+        assert calls[0] == ("tmux", "send-keys", "-t", "ccgram:@1", "hello", "Enter")
 
-    def test_retry_when_message_after_separator(self):
-        """Second send-keys Enter issued when first line of message appears after last ─── separator."""
+    def test_multi_line_sends_confirm_enter(self):
         from unittest.mock import patch, AsyncMock
         from ccgram.cron_runner import _default_send_keys
 
-        SEP = "\u2500\u2500\u2500"
-        subcommands = []
+        calls = []
 
         async def fake_exec(*args, **kwargs):
-            subcommands.append(args[1])
-            if args[1] == "capture-pane":
-                pane = f"history line\n{SEP}\nhello\n".encode()
-                return self._proc(stdout=pane)
+            calls.append(args)
             return self._proc()
 
         with (
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
-            self._run(_default_send_keys("ccgram:@1", "hello"))
+            asyncio.run(_default_send_keys("ccgram:@1", "line1\nline2"))
 
-        assert subcommands == ["load-buffer", "paste-buffer", "send-keys", "capture-pane", "send-keys"]
-
-    def test_no_retry_when_message_not_after_separator(self):
-        """No retry when first line of message is not in the area after the last ─── separator."""
-        from unittest.mock import patch, AsyncMock
-        from ccgram.cron_runner import _default_send_keys
-
-        SEP = "\u2500\u2500\u2500"
-        subcommands = []
-
-        async def fake_exec(*args, **kwargs):
-            subcommands.append(args[1])
-            if args[1] == "capture-pane":
-                # message appears BEFORE separator (already in history, not input area)
-                pane = f"hello\n{SEP}\nprompt > \n".encode()
-                return self._proc(stdout=pane)
-            return self._proc()
-
-        with (
-            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
-            patch("asyncio.sleep", new_callable=AsyncMock),
-        ):
-            self._run(_default_send_keys("ccgram:@1", "hello"))
-
-        assert subcommands == ["load-buffer", "paste-buffer", "send-keys", "capture-pane"]
+        assert len(calls) == 2
+        assert calls[0] == ("tmux", "send-keys", "-t", "ccgram:@1", "line1\nline2", "Enter")
+        assert calls[1] == ("tmux", "send-keys", "-t", "ccgram:@1", "Enter")
