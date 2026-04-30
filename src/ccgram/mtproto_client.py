@@ -298,8 +298,17 @@ class MTProtoClient:
         if self._client is None:
             from telethon import TelegramClient  # lazy import
 
+            # Support SOCKS5 proxy for environments where Telegram DCs are blocked
+            proxy = None
+            proxy_env = os.environ.get("CCGRAM_MTPROTO_PROXY", "")
+            if proxy_env.startswith("socks5://"):
+                parts = proxy_env.replace("socks5://", "").split(":")
+                if len(parts) == 2:
+                    proxy = ("socks5", parts[0], int(parts[1]))
+
             self._client = TelegramClient(
-                self._session_stem, self._api_id, self._api_hash
+                self._session_stem, self._api_id, self._api_hash,
+                proxy=proxy,
             )
 
     async def login(self, *, phone: str | None = None) -> None:
