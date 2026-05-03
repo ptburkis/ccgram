@@ -657,7 +657,10 @@ class TmuxManager:
                 self._pane_send, window_id, text, enter=False, literal=True
             ):
                 return False
-        await asyncio.sleep(0.5)
+        # Scale delay by text length — TUI needs time to render large pastes.
+        # Codex (Node/Ink) is slower than Claude's TUI for long inputs.
+        delay = max(0.5, min(3.0, len(text) / 200))
+        await asyncio.sleep(delay)
         return await asyncio.to_thread(
             self._pane_send, window_id, "", enter=True, literal=False
         )

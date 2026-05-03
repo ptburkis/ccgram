@@ -645,6 +645,20 @@ class SessionMonitor:
 
             if provider.capabilities.supports_incremental_read:
                 initial_offset = file_size
+                # Check DB for a stored offset (set by recovery scripts
+                # or external tooling) — use it if lower than file_size
+                # so we backfill content written before tracking started.
+                try:
+                    with _store.connect() as conn:
+                        row = conn.execute(
+                            "SELECT transcript_offset FROM sessions "
+                            "WHERE session_id = ? AND transcript_offset IS NOT NULL",
+                            (session_id,),
+                        ).fetchone()
+                        if row and row[0] is not None and row[0] < file_size:
+                            initial_offset = row[0]
+                except Exception:
+                    pass
             else:
                 # Whole-file provider: count existing messages to skip them
                 _, initial_offset = await asyncio.to_thread(
@@ -657,11 +671,18 @@ class SessionMonitor:
                 last_byte_offset=initial_offset,
             )
             self.state.update_session(tracked)
-            self._file_mtimes[session_id] = current_mtime
+            if initial_offset < file_size:
+                # Content exists before our offset — force a read on this pass
+                # by setting mtime to 0 so the change-detection below fires.
+                self._file_mtimes[session_id] = 0.0
+            else:
+                self._file_mtimes[session_id] = current_mtime
             if provider.capabilities.name == "claude" and window_id:
                 await self._seed_claude_task_state(window_id, session_id, file_path)
-            logger.debug("Started tracking session: %s", session_id)
-            return
+            logger.debug("Started tracking session: %s (offset=%d)", session_id, initial_offset)
+            if initial_offset >= file_size:
+                return
+            # Fall through to read existing content immediately
 
         # Check mtime and size to see if file has changed.
         # Size check catches writes within the same second (mtime granularity).
@@ -1259,14 +1280,15 @@ class SessionMonitor:
                 continue
         sid_to_wid: dict[str, str] = {s.session_id: s.window_id for s in sessions if s.window_id}
         desired: dict[int, dict[int, str]] = {}
+        from .config import config as _cfg
+        _fallback_uid = next((u for u in getattr(_cfg, "allowed_users", set()) if isinstance(u, int)), None)
         for b in bindings:
-            uid = gid_tid_to_uid.get((b.group_id, b.topic_id))
+            uid = gid_tid_to_uid.get((b.group_id, b.topic_id)) or getattr(b, "user_id", None) or _fallback_uid
             wid = b.window_id or sid_to_wid.get(b.session_id)
             if uid is None or wid is None:
                 continue
             desired.setdefault(uid, {})[b.topic_id] = wid
         # Multi-user: replicate desired bindings for all allowed users
-        from .config import config as _cfg
         all_uids = set(desired.keys())
         for _au in getattr(_cfg, "allowed_users", set()):
             if isinstance(_au, int):

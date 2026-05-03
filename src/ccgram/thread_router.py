@@ -265,11 +265,46 @@ class ThreadRouter:
         return window_id
 
     def get_window_for_thread(self, user_id: int, thread_id: int) -> str | None:
-        """Look up the window_id bound to a thread."""
+        """Look up the window_id bound to a thread.
+
+        Falls back to DB if not in memory (e.g. binding created externally
+        by a recovery script or dashboard).  On hit, populates the in-memory
+        cache so subsequent lookups are fast.
+        """
         bindings = self.thread_bindings.get(user_id)
-        if not bindings:
-            return None
-        return bindings.get(thread_id)
+        if bindings:
+            wid = bindings.get(thread_id)
+            if wid is not None:
+                return wid
+
+        # DB fallback: binding may exist but not yet loaded in-memory
+        try:
+            with _get_conn() as conn:
+                row = conn.execute(
+                    "SELECT window_id FROM topic_bindings "
+                    "WHERE topic_id = ? AND window_id IS NOT NULL",
+                    (thread_id,),
+                ).fetchone()
+                if row:
+                    db_wid = row[0] if isinstance(row, tuple) else row["window_id"]
+                    if user_id not in self.thread_bindings:
+                        self.thread_bindings[user_id] = {}
+                    self.thread_bindings[user_id][thread_id] = db_wid
+                    self._window_to_thread[(user_id, db_wid)] = thread_id
+                    logger.info(
+                        "DB fallback: loaded binding thread %d -> %s for user %d",
+                        thread_id, db_wid, user_id,
+                    )
+                    conn.execute(
+                        "UPDATE topic_bindings SET user_id = ? "
+                        "WHERE topic_id = ? AND user_id IS NULL",
+                        (user_id, thread_id),
+                    )
+                    return db_wid
+        except Exception:
+            logger.debug("DB fallback lookup failed for thread %d", thread_id, exc_info=True)
+
+        return None
 
     def get_thread_for_window(self, user_id: int, window_id: str) -> int | None:
         """Reverse lookup: get thread_id for a window (O(1) via reverse index)."""

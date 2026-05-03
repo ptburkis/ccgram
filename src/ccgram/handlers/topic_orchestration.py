@@ -45,6 +45,7 @@ logger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 _ALERT_DEBOUNCE_SECONDS: int = 30 * 60
 _last_alert_sent: dict[str, float] = {}
+_boot_time: float = __import__("time").monotonic()
 
 _ALERT_TEMPLATE = (
     "⚠️ Unbound window {window_id!r} ({window_name!r}, cwd={cwd!r}) emitted output.\n"
@@ -55,8 +56,19 @@ _ALERT_TEMPLATE = (
 
 
 def _is_window_already_bound(window_id: str) -> bool:
-    """Check if a window is already bound to any topic."""
-    return thread_router.has_window(window_id)
+    """Check if a window is already bound to any topic (in-memory or DB)."""
+    if thread_router.has_window(window_id):
+        return True
+    try:
+        from ..store import connect
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM topic_bindings WHERE window_id = ?",
+                (window_id,),
+            ).fetchone()
+            return row is not None
+    except Exception:
+        return False
 
 
 async def _auto_detect_provider(window_id: str) -> None:
@@ -229,6 +241,12 @@ async def handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
 
     if _is_window_already_bound(event.window_id):
         logger.debug("New window %s already bound, skipping alert", event.window_id)
+        return
+
+    # Suppress alerts during startup grace period (DB may not be loaded yet)
+    import time as _time
+    if _time.monotonic() - _boot_time < 60:
+        logger.debug("Startup grace: suppressing alert for %s", event.window_id)
         return
 
     await _auto_detect_provider(event.window_id)
