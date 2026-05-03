@@ -67,8 +67,16 @@ class MonitorState:
         try:
             with store.connect() as conn:
                 prefs = store.list_prefs(conn, "monitor")
+                events_offset = store.get_pref(
+                    conn,
+                    "monitor_meta",
+                    "events_offset",
+                    scope_id="global",
+                    default=None,
+                )
         except (sqlite3.DatabaseError, FileNotFoundError, ModuleNotFoundError):
             prefs = []
+            events_offset = None
         if prefs:
             # Rehydrate tracked_sessions from (scope_id=session_id, key, value)
             tmp: dict[str, dict] = {}
@@ -85,9 +93,16 @@ class MonitorState:
                 for sid, d in tmp.items()
                 if d.get("file_path")
             }
+            if events_offset is not None:
+                # Coerce defensively — JSON may have stored as float/str.
+                try:
+                    self.events_offset = int(events_offset)
+                except (TypeError, ValueError):
+                    self.events_offset = 0
             logger.info(
-                "Loaded %d tracked sessions from DB",
+                "Loaded %d tracked sessions from DB (events_offset=%d)",
                 len(self.tracked_sessions),
+                self.events_offset,
             )
             return
         logger.warning(
@@ -148,6 +163,13 @@ class MonitorState:
                         session.file_path,
                         scope_id=session.session_id,
                     )
+                store.set_pref(
+                    conn,
+                    "monitor_meta",
+                    "events_offset",
+                    self.events_offset,
+                    scope_id="global",
+                )
             logger.debug(
                 "Saved %d tracked session offsets to DB",
                 len(self.tracked_sessions),
