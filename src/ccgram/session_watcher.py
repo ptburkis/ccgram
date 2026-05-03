@@ -368,7 +368,7 @@ async def _process_new_jsonl(jsonl_path: Path) -> None:
 
     if new_sid == old_sid:
         logger.debug(
-            "session watcher: %s already tracked for @%s — skipping",
+            "session watcher: %s already tracked for %s — skipping",
             new_sid,
             window_id,
         )
