@@ -482,6 +482,16 @@ def _find_window_for_jsonl(
     # ── Step 2: cwd-based resolution ────────────────────────────────────────
     if len(claude_entries) == 1:
         window_id, window_name, current_sid = claude_entries[0]
+        if current_sid and current_sid != new_sid:
+            from .transcript_ownership import jsonl_has_hook_marker
+            if not jsonl_has_hook_marker(jsonl_path, window_id, window_name):
+                logger.warning(
+                    "session watcher [cwd-single]: refusing to displace "
+                    "live binding for %s (current=%s, new=%s) — "
+                    "JSONL lacks hook marker",
+                    window_id, current_sid, new_sid,
+                )
+                return None
         logger.info(
             "session watcher [cwd-single]: matched %s -> %s (%s)",
             new_sid, window_id, window_name,
@@ -489,12 +499,34 @@ def _find_window_for_jsonl(
         return window_id, window_name, current_sid
 
     if len(claude_entries) > 1:
+        from .transcript_ownership import jsonl_has_hook_marker
+        safe_candidates = [
+            c for c in claude_entries
+            if not c[2] or c[2] == new_sid
+            or jsonl_has_hook_marker(jsonl_path, c[0], c[1])
+        ]
+        if not safe_candidates:
+            logger.warning(
+                "session watcher [cwd-ambiguous]: %d candidates share "
+                "cwd slug %s for %s but none carry the hook marker — "
+                "refusing to displace live bindings",
+                len(claude_entries), project_slug, new_sid,
+            )
+            return None
+        if len(safe_candidates) == 1:
+            window_id, window_name, current_sid = safe_candidates[0]
+            logger.info(
+                "session watcher [cwd-ambiguous→single]: matched %s -> %s (%s)",
+                new_sid, window_id, window_name,
+            )
+            return window_id, window_name, current_sid
         logger.warning(
-            "session watcher [cwd-ambiguous]: %d windows share cwd slug %s for %s "
-            "— picking most-recent; consider using CCGRAM_SESSION_ID",
-            len(claude_entries), project_slug, new_sid,
+            "session watcher [cwd-ambiguous]: %d safe candidates share "
+            "cwd slug %s for %s — picking most-recent; consider using "
+            "CCGRAM_SESSION_ID",
+            len(safe_candidates), project_slug, new_sid,
         )
-        best = max(claude_entries, key=lambda t: (t[2] or ""))
+        best = max(safe_candidates, key=lambda t: (t[2] or ""))
         window_id, window_name, current_sid = best
         return window_id, window_name, current_sid
 

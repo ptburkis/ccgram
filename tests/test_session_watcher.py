@@ -151,3 +151,159 @@ def test_scan_omits_windows_with_no_identity(home_dir, monkeypatch):
     monkeypatch.setattr(session_watcher, "_get_pane_pid", lambda wid: None)
     result = scan_all_pane_identities(["@1", "@2"])
     assert result == {"@1": "sid-x"}
+
+
+# ---------------------------------------------------------------------------
+# Tests for cwd-based resolution (Bug B guards) — added 2026-05-04
+# ---------------------------------------------------------------------------
+
+import json
+import time
+from pathlib import Path
+from unittest.mock import patch
+
+
+def _make_hook_marker_content(window_id: str, window_name: str, session_id: str) -> bytes:
+    """Produce minimal JSONL content that contains the hook marker twice.
+
+    jsonl_has_hook_marker requires >=2 occurrences to avoid false positives.
+    The marker format: tmux key=ccgram:<window_id>, window_name=<wname>, session_id=<stem>
+    """
+    marker_line = (
+        f"tmux key=ccgram:{window_id}, window_name={window_name}, session_id={session_id}"
+    )
+    line = json.dumps({"type": "system", "content": marker_line})
+    return (line + "\n" + line + "\n").encode()
+
+
+def _write_session_map(path: Path, entries: list[dict]) -> None:
+    """Write a session_map.json from a list of dicts with keys:
+    window_id, window_name, session_id, cwd
+    """
+    sm = {}
+    for e in entries:
+        key = f"ccgram:{e['window_id']}"
+        sm[key] = {
+            "session_id": e.get("session_id", ""),
+            "window_name": e.get("window_name", ""),
+            "cwd": e.get("cwd", "/home/peter/projects/testproj"),
+            "provider": "claude",
+            "transcript_path": "",
+        }
+    path.write_text(json.dumps(sm))
+
+
+def _make_jsonl(tmp_path: Path, session_id: str, content: bytes = b"") -> Path:
+    """Create a fake JSONL file under a claude project slug directory."""
+    slug = "-home-peter-projects-testproj"
+    proj_dir = tmp_path / slug
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    p = proj_dir / f"{session_id}.jsonl"
+    p.write_bytes(content)
+    return p
+
+
+def test_cwd_single_refuses_displacement_without_hook_marker(tmp_path, monkeypatch):
+    """cwd-single: refuses to displace a live binding when JSONL lacks hook marker."""
+    from ccgram import session_watcher, config as cfg
+
+    # Point config at tmp_path
+    monkeypatch.setattr(cfg.config, "session_map_file", tmp_path / "session_map.json")
+    monkeypatch.setattr(cfg.config, "tmux_session_name", "ccgram")
+
+    existing_sid = "sid-existing-abc"
+    new_sid = "sid-new-xyz"
+    window_id = "@7"
+    window_name = "james"
+
+    # One entry, cwd matches, has a live current_sid
+    _write_session_map(tmp_path / "session_map.json", [
+        {"window_id": window_id, "window_name": window_name,
+         "session_id": existing_sid, "cwd": "/home/peter/projects/testproj"},
+    ])
+
+    # New JSONL has NO hook marker
+    jsonl_path = _make_jsonl(tmp_path, new_sid, b"no marker here\n")
+    content = jsonl_path.read_bytes()
+
+    # Disable PTY marker path and env-marker path
+    monkeypatch.setattr(session_watcher, "resolve_session_identity", lambda wid: None)
+    with patch("ccgram.session_watcher._find_window_for_jsonl",
+               wraps=session_watcher._find_window_for_jsonl) as _wrapped:
+        # Disable pty_markers import inside the function
+        import ccgram.pty_markers as _pty
+        monkeypatch.setattr(_pty, "list_active_markers", lambda: [])
+        result = session_watcher._find_window_for_jsonl(jsonl_path, content)
+
+    assert result is None, "must refuse displacement when JSONL lacks hook marker"
+
+
+def test_cwd_single_allows_legit_rotation_with_hook_marker(tmp_path, monkeypatch):
+    """cwd-single: allows rotation when JSONL contains valid hook marker for the window."""
+    from ccgram import session_watcher, config as cfg
+
+    monkeypatch.setattr(cfg.config, "session_map_file", tmp_path / "session_map.json")
+    monkeypatch.setattr(cfg.config, "tmux_session_name", "ccgram")
+
+    existing_sid = "sid-existing-abc"
+    new_sid = "sid-new-xyz"
+    window_id = "@7"
+    window_name = "james"
+
+    _write_session_map(tmp_path / "session_map.json", [
+        {"window_id": window_id, "window_name": window_name,
+         "session_id": existing_sid, "cwd": "/home/peter/projects/testproj"},
+    ])
+
+    # New JSONL HAS the hook marker (>=2 occurrences)
+    marker_content = _make_hook_marker_content(window_id, window_name, new_sid)
+    jsonl_path = _make_jsonl(tmp_path, new_sid, marker_content)
+    content = jsonl_path.read_bytes()
+
+    monkeypatch.setattr(session_watcher, "resolve_session_identity", lambda wid: None)
+    import ccgram.pty_markers as _pty
+    monkeypatch.setattr(_pty, "list_active_markers", lambda: [])
+
+    result = session_watcher._find_window_for_jsonl(jsonl_path, content)
+
+    assert result is not None, "should match when hook marker is present"
+    assert result[0] == window_id
+    assert result[1] == window_name
+
+
+def test_cwd_ambiguous_filters_to_marker_carriers(tmp_path, monkeypatch):
+    """cwd-ambiguous: two windows share cwd; only the one with the marker is returned."""
+    from ccgram import session_watcher, config as cfg
+
+    monkeypatch.setattr(cfg.config, "session_map_file", tmp_path / "session_map.json")
+    monkeypatch.setattr(cfg.config, "tmux_session_name", "ccgram")
+
+    existing_sid_a = "sid-win-a"
+    existing_sid_b = "sid-win-b"
+    new_sid = "sid-new-qrs"
+    window_id_a = "@8"
+    window_id_b = "@9"
+    window_name_a = "james"
+    window_name_b = "bulugo"
+
+    # Two entries, same cwd slug
+    _write_session_map(tmp_path / "session_map.json", [
+        {"window_id": window_id_a, "window_name": window_name_a,
+         "session_id": existing_sid_a, "cwd": "/home/peter/projects/testproj"},
+        {"window_id": window_id_b, "window_name": window_name_b,
+         "session_id": existing_sid_b, "cwd": "/home/peter/projects/testproj"},
+    ])
+
+    # JSONL has marker for window_id_a only
+    marker_content = _make_hook_marker_content(window_id_a, window_name_a, new_sid)
+    jsonl_path = _make_jsonl(tmp_path, new_sid, marker_content)
+    content = jsonl_path.read_bytes()
+
+    monkeypatch.setattr(session_watcher, "resolve_session_identity", lambda wid: None)
+    import ccgram.pty_markers as _pty
+    monkeypatch.setattr(_pty, "list_active_markers", lambda: [])
+
+    result = session_watcher._find_window_for_jsonl(jsonl_path, content)
+
+    assert result is not None, "should find the marker-carrying candidate"
+    assert result[0] == window_id_a, "should pick @8 (has the marker)"
