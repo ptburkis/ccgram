@@ -21,6 +21,8 @@ Key data:
 
 from __future__ import annotations
 
+import sqlite3
+import time
 import structlog
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -166,7 +168,7 @@ class ThreadRouter:
             self.window_display_names[window_id] = window_name
 
         # Write through to DB: update user_id and window_id on the binding row
-        self._db_write_binding(user_id, thread_id, window_id)
+        self._db_write_binding(user_id, thread_id, window_id, window_name)
         # Store display name in user_prefs
         if window_name:
             self._db_write_display_name(window_id, window_name)
@@ -181,16 +183,88 @@ class ThreadRouter:
             user_id,
         )
 
-    def _db_write_binding(self, user_id: int, thread_id: int, window_id: str) -> None:
-        """Update topic_bindings.user_id and window_id for the given topic_id."""
+    def _db_write_binding(
+        self, user_id: int, thread_id: int, window_id: str, window_name: str = ""
+    ) -> None:
+        """Upsert topic_bindings for the given topic_id.
+
+        Attempts UPDATE first.  If 0 rows matched (binding row missing), falls
+        back to INSERT using state derived from the sessions table and existing
+        topic_bindings rows.
+        """
         try:
             with _get_conn() as conn:
-                conn.execute(
+                cur = conn.execute(
                     """UPDATE topic_bindings
                        SET user_id = ?, window_id = ?
                        WHERE topic_id = ?""",
                     (user_id, window_id, thread_id),
                 )
+                if cur.rowcount > 0:
+                    # Row existed — update succeeded, nothing more to do.
+                    return
+
+                # --- INSERT path: no row exists for this topic_id ---
+
+                # Step 1: look up active session_id at window_id.
+                row = conn.execute(
+                    "SELECT session_id FROM sessions "
+                    "WHERE window_id = ? AND status = 'active' LIMIT 1",
+                    (window_id,),
+                ).fetchone()
+                if not row:
+                    logger.warning(
+                        "bind_thread: no active session for window_id %s — "
+                        "skipping DB write for thread %d",
+                        window_id,
+                        thread_id,
+                    )
+                    return
+                session_id = row["session_id"]
+
+                # Step 2: derive group_id from existing topic_bindings or config.
+                grp_row = conn.execute(
+                    "SELECT group_id FROM topic_bindings LIMIT 1"
+                ).fetchone()
+                if grp_row:
+                    group_id = grp_row["group_id"]
+                else:
+                    _FALLBACK_GROUP_ID = -1003568873755
+                    group_id = _FALLBACK_GROUP_ID
+                    logger.warning(
+                        "bind_thread: no existing topic_bindings row to derive "
+                        "group_id — using fallback %d for thread %d",
+                        group_id,
+                        thread_id,
+                    )
+
+                # Step 3: topic_title from window_name or placeholder.
+                topic_title = window_name or f"window {window_id}"
+
+                # Step 4: insert with FK guard (session_id UNIQUE constraint).
+                try:
+                    conn.execute(
+                        """INSERT INTO topic_bindings
+                               (group_id, topic_id, session_id, topic_title,
+                                bound_at, user_id, window_id)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (group_id, thread_id, session_id, topic_title,
+                         int(time.time()), user_id, window_id),
+                    )
+                    logger.info(
+                        "bind_thread: created topic_bindings row for thread %d -> %s "
+                        "(sid=%s)",
+                        thread_id,
+                        window_id,
+                        session_id,
+                    )
+                except sqlite3.IntegrityError:
+                    logger.warning(
+                        "bind_thread: UNIQUE violation — session_id %s already "
+                        "bound to another topic; skipping INSERT for thread %d",
+                        session_id,
+                        thread_id,
+                    )
         except Exception:
             logger.debug("bind_thread: DB write failed for thread %d", thread_id, exc_info=True)
 
