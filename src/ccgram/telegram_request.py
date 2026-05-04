@@ -36,7 +36,16 @@ class ResilientPollingHTTPXRequest(HTTPXRequest):
 
     async def do_request(self, *args, **kwargs):  # type: ignore[override]
         try:
-            return await super().do_request(*args, **kwargs)
+            result = await super().do_request(*args, **kwargs)
+            # Polling keepalive: record heartbeat on every successful getUpdates
+            # poll.  Empty results count as healthy — tracking only message
+            # arrivals would falsely kill the bot during legitimate idle periods
+            # (potentially days).
+            url = kwargs.get("url", args[0] if args else "")
+            if "getUpdates" in str(url):
+                from .handlers.polling_watchdog import record_inbound as _record_inbound
+                _record_inbound()
+            return result
         except (TimedOut, NetworkError) as exc:
             await self._reset_client(reason=exc.__class__.__name__)
             logger.warning(
