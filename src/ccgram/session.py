@@ -46,6 +46,11 @@ from .window_state_store import (
 logger = structlog.get_logger()
 
 
+def _log_mutation(event: str, **kwargs) -> None:
+    import traceback
+    logger.warning("MUTATION: %s %s caller=%s", event, kwargs, traceback.extract_stack(limit=4)[-2:])
+
+
 _LEGACY_SESSION_PREFIX = "ccbot:"
 
 
@@ -657,6 +662,7 @@ class SessionManager:
                 del self.window_states[window_id]
                 changed_state = True
 
+        _log_mutation("session_map_write", window=str([w for _, w in dead_entries]), session="-", details=f"prune_dead_entries count={len(dead_entries)}")
         atomic_write_json(config.session_map_file, raw)
         if changed_state:
             self._save_state()
@@ -941,6 +947,7 @@ class SessionManager:
         if rewrote:
             session_map = rebuilt
             try:
+                _log_mutation("session_map_write", window="-", session="-", details="web_key_canonicalise")
                 atomic_write_json(config.session_map_file, session_map)
             except OSError:
                 pass
@@ -1027,6 +1034,7 @@ class SessionManager:
                 entry["session_id"] = ""
                 map_changed = True
         if map_changed:
+            _log_mutation("session_map_write", window=str(list(deduped_wids)), session="-", details=f"dedup_clearance count={len(deduped_wids)}")
             atomic_write_json(config.session_map_file, session_map)
 
         # Clean up window_states entries not in current session_map.
@@ -1059,6 +1067,7 @@ class SessionManager:
             for key in old_format_keys:
                 logger.info("Removing old-format session_map key: %s", key)
                 del session_map[key]
+            _log_mutation("session_map_write", window="-", session="-", details=f"purge_old_format_keys count={len(old_format_keys)}")
             atomic_write_json(config.session_map_file, session_map)
 
         if changed:
@@ -1082,6 +1091,7 @@ class SessionManager:
         session_map.json write, which is safe to call from any thread.
         """
         state = self.get_window_state(window_id)
+        _log_mutation("session_map_write", window=window_id, session=session_id, details=f"register_hookless provider={provider_name}")
         state.session_id = session_id
         state.cwd = cwd
         state.transcript_path = transcript_path
@@ -1187,6 +1197,10 @@ class SessionManager:
 
     def _clear_session_map_entry(self, window_id: str) -> None:
         """Remove a window's entry from session_map.json if present."""
+        from .session_map import _has_live_pty_marker
+        if _has_live_pty_marker(window_id):
+            logger.debug("Skipping clear for %s: live PTY marker present", window_id)
+            return
         if not config.session_map_file.exists():
             return
         lock_path = config.session_map_file.with_suffix(".lock")
@@ -1198,6 +1212,7 @@ class SessionManager:
                     key = f"{config.tmux_session_name}:{window_id}"
                     if key in raw:
                         del raw[key]
+                        _log_mutation("session_map_clear", window=window_id, session="-", details="_clear_session_map_entry")
                         atomic_write_json(config.session_map_file, raw)
                         logger.debug("Cleared session_map entry for %s", window_id)
                 except (json.JSONDecodeError, OSError):  # fmt: skip

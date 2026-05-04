@@ -32,6 +32,12 @@ from .window_resolver import EMDASH_SESSION_PREFIX, is_foreign_window, is_window
 
 logger = structlog.get_logger()
 
+
+def _log_mutation(event: str, **kwargs) -> None:
+    import traceback
+    logger.warning("MUTATION: %s %s caller=%s", event, kwargs, traceback.extract_stack(limit=4)[-2:])
+
+
 _LEGACY_SESSION_PREFIX = "ccbot:"
 
 _DEFAULT_PRIMARY_SESSION_GRACE_SEC = 60.0
@@ -67,6 +73,17 @@ def _transcript_is_fresh(transcript_path: str, *, now: float | None = None) -> b
         return False
     reference = time.time() if now is None else now
     return reference - mtime < _primary_session_grace_sec()
+
+
+def _has_live_pty_marker(window_id: str, max_age_seconds: float = 120.0) -> bool:
+    """Return True if a PTY marker exists for window_id and tmux still has it.
+
+    Delegates to :func:`ccgram.window_authority.is_window_alive` which is the
+    single liveness oracle.  ``max_age_seconds`` is kept for API compatibility
+    but is no longer used (see window_authority for rationale).
+    """
+    from .window_authority import is_window_alive
+    return is_window_alive(window_id)
 
 
 def _prefer_existing_primary(
@@ -233,6 +250,7 @@ class SessionMapSync:
             session_map = rebuilt
             # Persist the cleanup so we don't repeat work each poll.
             try:
+                _log_mutation("session_map_write", window="-", session="-", details="web_key_canonicalise")
                 atomic_write_json(config.session_map_file, session_map)
             except OSError:
                 pass
@@ -361,6 +379,7 @@ class SessionMapSync:
         for key in old_format_keys:
             logger.info("Removing old-format session_map key: %s", key)
             del session_map[key]
+        _log_mutation("session_map_write", window="-", session="-", details=f"purge_old_format_keys count={len(old_format_keys)}")
         atomic_write_json(config.session_map_file, session_map)
 
     async def wait_for_session_map_entry(
@@ -441,6 +460,7 @@ class SessionMapSync:
                 del window_store.window_states[window_id]
                 changed_state = True
 
+        _log_mutation("session_map_write", window=str([w for _, w in dead_entries]), session="-", details=f"prune_dead_entries count={len(dead_entries)}")
         atomic_write_json(config.session_map_file, raw)
         if changed_state:
             self._schedule_save()
@@ -584,6 +604,7 @@ class SessionMapSync:
                         "transcript_path": transcript_path,
                         "provider_name": provider_name,
                     }
+                    _log_mutation("session_map_write", window=window_id, session=ccgram_sid, details=f"register_hookless provider={provider_name}")
                     atomic_write_json(map_file, session_map)
                     logger.info(
                         "Registered hookless session: %s -> session_id=%s, "
@@ -600,6 +621,9 @@ class SessionMapSync:
 
     def clear_session_map_entry(self, window_id: str) -> None:
         """Remove a window's entry from session_map.json if present."""
+        if _has_live_pty_marker(window_id):
+            logger.debug("Skipping clear for %s: live PTY marker present", window_id)
+            return
         if not config.session_map_file.exists():
             return
         lock_path = config.session_map_file.with_suffix(".lock")
@@ -611,6 +635,7 @@ class SessionMapSync:
                     key = f"{config.tmux_session_name}:{window_id}"
                     if key in raw:
                         del raw[key]
+                        _log_mutation("session_map_clear", window=window_id, session="-", details="clear_session_map_entry")
                         atomic_write_json(config.session_map_file, raw)
                         logger.debug("Cleared session_map entry for %s", window_id)
                 except (json.JSONDecodeError, OSError):  # fmt: skip
