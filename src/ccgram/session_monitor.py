@@ -529,16 +529,20 @@ class SessionMonitor:
                 await f.seek(0, 2)  # Seek to end
                 file_size = await f.tell()
 
-                # Detect file truncation: if offset is beyond file size, reset
+                # Detect file truncation: if offset is beyond file size, jump
+                # to current end-of-file. Resetting to 0 here re-shipped the
+                # entire transcript when Claude /compact rewrote the JSONL
+                # (replay storm 2026-05-04). The user wants forward progress,
+                # not a backfill of every historical message.
                 if session.last_byte_offset > file_size:
-                    logger.info(
+                    logger.warning(
                         "File truncated for session %s "
-                        "(offset %d > size %d). Resetting.",
+                        "(offset %d > size %d). Jumping to end-of-file.",
                         session.session_id,
                         session.last_byte_offset,
                         file_size,
                     )
-                    session.last_byte_offset = 0
+                    session.last_byte_offset = file_size
 
                 # Seek to last read position for incremental reading
                 await f.seek(session.last_byte_offset)
