@@ -52,6 +52,12 @@ _BACKOFF_MAX = 30.0
 
 logger = structlog.get_logger()
 
+
+def _log_mutation(event: str, **kwargs) -> None:
+    import traceback
+    logger.warning("MUTATION: %s %s caller=%s", event, kwargs, traceback.extract_stack(limit=4)[-2:])
+
+
 _PathResolveError = (OSError, ValueError)
 _SessionMapError = (json.JSONDecodeError, OSError)
 
@@ -646,8 +652,9 @@ class SessionMonitor:
             if provider.capabilities.supports_incremental_read:
                 initial_offset = file_size
                 # Check DB for a stored offset (set by recovery scripts
-                # or external tooling) — use it if lower than file_size
-                # so we backfill content written before tracking started.
+                # or external tooling) — use it only if positive and lower
+                # than file_size. A stored 0 is the default empty value,
+                # NOT an instruction to replay the entire file.
                 try:
                     with _store.connect() as conn:
                         row = conn.execute(
@@ -655,7 +662,7 @@ class SessionMonitor:
                             "WHERE session_id = ? AND transcript_offset IS NOT NULL",
                             (session_id,),
                         ).fetchone()
-                        if row and row[0] is not None and row[0] < file_size:
+                        if row and row[0] is not None and row[0] > 0 and row[0] < file_size:
                             initial_offset = row[0]
                 except Exception:
                     pass
@@ -1242,6 +1249,7 @@ class SessionMonitor:
             try:
                 from .utils import atomic_write_json
 
+                _log_mutation("session_map_write", window=str([w for w, _, _ in healed]), session=str([s for _, s, _ in healed]), details=f"reconcile_heal count={len(healed)}")
                 atomic_write_json(config.session_map_file, sm)
             except OSError:
                 logger.exception("Failed to persist reconciled session_map")
@@ -1256,61 +1264,20 @@ class SessionMonitor:
                 )
 
     async def _reload_topic_bindings_from_db(self) -> None:
-        import sqlite3 as _sqlite3
-        from . import store as _store
         from .thread_router import thread_router as _tr
         reload_secs = float(os.environ.get("CCGRAM_DB_RELOAD_SECS", "60"))
         now = time.monotonic()
         if now - self._last_db_reload < reload_secs:
             return
         self._last_db_reload = now
-        try:
-            with _store.connect() as conn:
-                bindings = _store.list_topic_bindings(conn)
-                gchat_rows = _store.list_prefs(conn, "group_chat")
-                sessions = _store.list_sessions(conn)
-        except (_sqlite3.DatabaseError, FileNotFoundError):
-            return
-        gid_tid_to_uid: dict[tuple[int, int], int] = {}
-        for _scope_id, key, value in gchat_rows:
-            try:
-                uid_s, tid_s = key.split(":", 1)
-                gid_tid_to_uid[(int(value), int(tid_s))] = int(uid_s)
-            except (ValueError, TypeError):
-                continue
-        sid_to_wid: dict[str, str] = {s.session_id: s.window_id for s in sessions if s.window_id}
-        desired: dict[int, dict[int, str]] = {}
-        from .config import config as _cfg
-        _fallback_uid = next((u for u in getattr(_cfg, "allowed_users", set()) if isinstance(u, int)), None)
-        for b in bindings:
-            uid = gid_tid_to_uid.get((b.group_id, b.topic_id)) or getattr(b, "user_id", None) or _fallback_uid
-            wid = b.window_id or sid_to_wid.get(b.session_id)
-            if uid is None or wid is None:
-                continue
-            desired.setdefault(uid, {})[b.topic_id] = wid
-        # Multi-user: replicate desired bindings for all allowed users
-        all_uids = set(desired.keys())
-        for _au in getattr(_cfg, "allowed_users", set()):
-            if isinstance(_au, int):
-                all_uids.add(_au)
-        all_topic_bindings = {}
-        for _d in desired.values():
-            all_topic_bindings.update(_d)
-        if all_topic_bindings:
-            for _au in all_uids:
-                desired.setdefault(_au, {}).update(all_topic_bindings)
-
-        for uid, topics in desired.items():
-            for tid, wid in topics.items():
-                current = _tr.thread_bindings.get(uid, {}).get(tid)
-                if current != wid:
-                    _tr.bind_thread(uid, tid, wid)
-                    logger.info("runtime reload: topic %d -> %s (user %d)", tid, wid, uid)
-        for uid, in_mem in list(_tr.thread_bindings.items()):
-            for tid in list(in_mem.keys()):
-                if tid not in desired.get(uid, {}):
-                    _tr.unbind_thread(uid, tid)
-                    logger.info("runtime reload: dropped stale topic %d (user %d)", tid, uid)
+        from . import session_repo as _session_repo
+        counts = _session_repo.hydrate_in_memory(thread_router=_tr)
+        logger.debug(
+            "runtime reload: hydrate_in_memory complete",
+            sessions=counts["sessions"],
+            bindings=counts["bindings"],
+            router_bindings=counts["updated_router_bindings"],
+        )
 
     async def _monitor_loop(self) -> None:
         """Background loop for checking session updates.

@@ -19,6 +19,11 @@ _PERIODIC_SAVE_INTERVAL = 30  # seconds
 logger = structlog.get_logger()
 
 
+def _log_mutation(event: str, **kwargs) -> None:
+    import traceback
+    logger.warning("MUTATION: %s %s caller=%s", event, kwargs, traceback.extract_stack(limit=4)[-2:])
+
+
 @dataclass
 class TrackedSession:
     """State for a tracked Claude Code session."""
@@ -183,12 +188,14 @@ class MonitorState:
 
     def update_session(self, session: TrackedSession) -> None:
         """Update or add a tracked session."""
+        _log_mutation("tracked_session_add", window="-", session=session.session_id, details=f"file={session.file_path} offset={session.last_byte_offset}")
         self.tracked_sessions[session.session_id] = session
         self._dirty = True
 
     def remove_session(self, session_id: str) -> None:
         """Remove a tracked session."""
         if session_id in self.tracked_sessions:
+            _log_mutation("tracked_session_remove", window="-", session=session_id, details="remove_session")
             del self.tracked_sessions[session_id]
             self._dirty = True
 
