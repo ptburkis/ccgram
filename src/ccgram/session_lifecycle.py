@@ -83,6 +83,11 @@ from ccgram import store
 logger = structlog.get_logger(__name__)
 
 
+def _log_mutation(event: str, **kwargs) -> None:
+    import traceback
+    logger.warning("MUTATION: %s %s caller=%s", event, kwargs, traceback.extract_stack(limit=4)[-2:])
+
+
 # ---- Types -------------------------------------------------------------------
 
 Agent = Literal["claude", "codex", "gemini"]
@@ -450,16 +455,19 @@ async def create_session(
                 key=f"{_DEFAULT_USER_ID}:{topic_id}",
                 value=group_id,
             )
-            # Step 6: promote to active.
-            store.upsert_session(
-                conn,
-                session_id=session_id,
-                cwd=cwd,
-                agent=agent,
-                mode=mode,
-                status="active",
-                window_id=window_id,
-            )
+
+        # Step 6: promote to active via session_repo (retire-before-insert in one TX).
+        # Separated from the step 5 block so session_repo manages its own connection.
+        # Note: session_repo.create_session_for_window also deletes the pending row
+        # seeded at step 1 (same session_id) before inserting the active row.
+        from . import session_repo as _session_repo
+        _session_repo.create_session_for_window(
+            session_id=session_id,
+            window_id=window_id,
+            cwd=cwd,
+            agent=agent,
+            mode=mode,
+        )
 
         # After DB writes: update thread_router in-memory so the running bot
         # knows about the new binding without a restart.  Without this, the
@@ -562,19 +570,19 @@ async def delete_session(
     # keep the session row for audit and let the binding linger until the
     # row is deleted elsewhere. To mirror the spec's "FK cascade deletes
     # topic_binding row", explicitly drop the binding here.
-    with store.connect() as conn:
-        if binding is not None:
+    if binding is not None:
+        with store.connect() as conn:
+            _log_mutation("binding_delete", window="-", session=session_id, details=f"group={binding.group_id} topic={binding.topic_id}")
             store.delete_topic_binding(conn, binding.group_id, binding.topic_id)
-        store.upsert_session(
-            conn,
-            session_id=session.session_id,
-            cwd=session.cwd,
-            agent=session.agent,
-            mode=session.mode,
-            status="retired",
-            window_id=None,
-            created_at=session.created_at,
-        )
+
+    # Retire the session via session_repo (force=True: user-initiated, bypasses liveness check).
+    _log_mutation("session_retire", window="-", session=session_id, details="delete_session (via session_repo)")
+    from . import session_repo as _session_repo
+    if session.window_id:
+        _session_repo.retire_window(session.window_id, reason="delete_session", force=True)
+    else:
+        # No window_id — session is already window-less; retire by session_id directly.
+        _session_repo.retire_by_session_id(session_id, reason="delete_session_no_window")
 
     logger.info("session_lifecycle.delete_ok", session_id=session_id)
 

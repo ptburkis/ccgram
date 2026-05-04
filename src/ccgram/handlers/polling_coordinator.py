@@ -62,6 +62,12 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+
+def _log_mutation(event: str, **kwargs) -> None:
+    import traceback
+    logger.warning("MUTATION: %s %s caller=%s", event, kwargs, traceback.extract_stack(limit=4)[-2:])
+
+
 # ── Timing constants ──────────────────────────────────────────────────────
 
 STATUS_POLL_INTERVAL = 1.0  # seconds
@@ -810,14 +816,12 @@ async def _handle_dead_window_notification(
     # this dead window and re-alert after a daemon restart (in-memory
     # is_dead_notified state doesn't survive restart).
     try:
-        from .. import store
-        with store.connect() as _c:
-            _c.execute(
-                "UPDATE sessions SET status='retired', window_id=NULL WHERE window_id=? AND status='active'",
-                (wid,),
-            )
+        from .. import session_repo
+        retired = session_repo.retire_window(wid, reason="dead_window_persist_retire")
+        if retired:
+            _log_mutation("session_retire", window=wid, session="-", details="dead_window_persist_retire (via session_repo)")
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("Failed to retire dead window %s", wid)
 
 
 # ── Main orchestration ──────────────────────────────────────────────────
