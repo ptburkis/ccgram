@@ -172,6 +172,13 @@ class Config:
         # the group's General thread (topic_id=0).
         self.alert_thread_id: int = _parse_int_env("CCGRAM_ALERT_THREAD_ID", 529)
 
+        # Topic-name emoji decorations (state circles, YOLO dice, RC dish).
+        # Default off — they were never re-requested after the original
+        # bf6a4aac removal and reappeared after the v4 reinstall.
+        self.topic_emoji_enabled: bool = os.getenv(
+            "CCGRAM_TOPIC_EMOJI_ENABLED", "0"
+        ).lower() in ("1", "true", "yes")
+
         # Auto-close stale topics (minutes; 0 = disabled)
         self.autoclose_done_minutes = int(os.getenv("AUTOCLOSE_DONE_MINUTES", "30"))
         self.autoclose_dead_minutes = int(os.getenv("AUTOCLOSE_DEAD_MINUTES", "10"))
