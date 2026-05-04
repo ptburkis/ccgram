@@ -194,11 +194,19 @@ def _update_session_map_sync(
                     if _db.exists():
                         _c = _sq3.connect(str(_db))
                         _now = int(_t.time())
-                        # 1. Rebind topic.
-                        _c.execute(
-                            "UPDATE topic_bindings SET session_id=? WHERE window_id=?",
-                            (new_sid, window_id),
-                        )
+                        # 1. Rebind topic — only migrate rows still pointing at old_sid.
+                        if old_sid:
+                            cur = _c.execute(
+                                "UPDATE topic_bindings SET session_id=? "
+                                "WHERE window_id=? AND session_id=?",
+                                (new_sid, window_id, old_sid),
+                            )
+                            if cur.rowcount == 0:
+                                logger.info(
+                                    "auto-heal: skipped topic_binding update for %s — "
+                                    "no row with session_id=%s",
+                                    window_id, old_sid,
+                                )
                         # 2. Release window_id from old session so upsert_session()
                         #    no-steal guard does not block _handle_session_start.
                         if old_sid:
