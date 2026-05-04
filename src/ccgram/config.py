@@ -179,7 +179,7 @@ class Config:
         # System windows: internal tmux windows never bound to Telegram topics.
         # Format: comma-separated "name:provider" pairs.
         self.system_windows: list[tuple[str, str]] = []
-        raw = os.getenv("CCGRAM_SYSTEM_WINDOWS", "usage-scraper:claude,usage-scraper-codex:codex")
+        raw = os.getenv("CCGRAM_SYSTEM_WINDOWS", "usage-scraper:claude,usage-scraper-codex:codex,ccgram-bot:none")
         if raw.strip():
             for entry in raw.split(","):
                 parts = entry.strip().split(":", 1)

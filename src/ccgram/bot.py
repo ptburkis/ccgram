@@ -958,6 +958,9 @@ async def post_init(application: Application) -> None:
         if _existing:
             config._system_window_ids.add(_existing.window_id)
             logger.info("System window '%s' found: %s", _win_name, _existing.window_id)
+        elif _provider == "none":
+            logger.debug("System window '%s' (provider=none) not present, no spawn", _win_name)
+            continue
         else:
             # Create window via subprocess (avoids create_window's dir requirement)
             _result = _subprocess.run(
@@ -979,6 +982,14 @@ async def post_init(application: Application) -> None:
                     logger.info("System window '%s' spawned: %s (%s)", _win_name, _new_win.window_id, _provider)
             else:
                 logger.warning("Failed to create system window '%s': %s", _win_name, _result.stderr.decode())
+
+    _self_pane = os.environ.get("TMUX_PANE", "")
+    if _self_pane:
+        _r = _subprocess.run(["tmux", "display-message", "-p", "-t", _self_pane, "#{window_id}"], capture_output=True, text=True)
+        _self_wid = _r.stdout.strip()
+        if _self_wid:
+            config._system_window_ids.add(_self_wid)
+            logger.info("Self window detected via TMUX_PANE: %s", _self_wid)
 
     # Warn if Claude Code hooks are not installed (provider-aware, non-blocking)
     provider = get_provider()
