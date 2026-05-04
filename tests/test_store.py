@@ -561,7 +561,7 @@ class TestSchemaV2Migration:
             version = c.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()
-            assert version[0] == "3"  # v1 gets fully migrated to current version
+            assert version[0] == "4"  # v1 gets fully migrated to current version
 
     def test_migration_is_idempotent(self, tmp_path):
         db = tmp_path / "v2.db"
@@ -571,7 +571,7 @@ class TestSchemaV2Migration:
             version = c.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()
-            assert version[0] == "3"  # current version
+            assert version[0] == "4"  # current version
 
 
 # ---- TestCronV2Fields --------------------------------------------------------

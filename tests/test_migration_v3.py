@@ -108,7 +108,7 @@ class TestSchemaV3Migration:
             version = c.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()
-            assert version[0] == "3"
+            assert version[0] == "4"  # v2 gets fully migrated to current version
 
     def test_v3_migration_window_id_populated_from_sessions(self, tmp_path):
         """Migration populates window_id from sessions table."""

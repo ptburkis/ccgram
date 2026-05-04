@@ -22,6 +22,8 @@ Schema versions:
   1 — initial schema (sessions, topic_bindings, orphaned_topics, heartbeats, crons, user_prefs)
   2 — crons: added target_session_id, target_topic_id, target_group_id columns
   3 — topic_bindings: added user_id, window_id; new window_modes table
+  4 — sessions: declared provider_session_id, transcript_offset, transcript_path;
+      added partial unique index idx_sessions_one_active_per_window
 """
 
 import json
@@ -41,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # ---- Schema ------------------------------------------------------------------
 
-_SCHEMA_VERSION = "3"
+_SCHEMA_VERSION = "4"
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -50,14 +52,17 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id TEXT PRIMARY KEY,
-    cwd        TEXT NOT NULL,
-    agent      TEXT NOT NULL,
-    mode       TEXT,
-    status     TEXT NOT NULL CHECK (status IN ('pending','active','errored','retired')),
-    window_id  TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    session_id          TEXT    PRIMARY KEY,
+    cwd                 TEXT    NOT NULL,
+    agent               TEXT    NOT NULL,
+    mode                TEXT,
+    status              TEXT    NOT NULL CHECK (status IN ('pending','active','errored','retired')),
+    window_id           TEXT,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    provider_session_id TEXT,
+    transcript_offset   INTEGER NOT NULL DEFAULT 0,
+    transcript_path     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_window_id ON sessions(window_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status    ON sessions(status);
@@ -235,6 +240,12 @@ _V3_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_topic_bindings_window ON topic_bindings(window_id)",
 ]
 
+_V4_SESSION_ALTERS = [
+    ("provider_session_id", "ALTER TABLE sessions ADD COLUMN provider_session_id TEXT"),
+    ("transcript_offset", "ALTER TABLE sessions ADD COLUMN transcript_offset INTEGER NOT NULL DEFAULT 0"),
+    ("transcript_path", "ALTER TABLE sessions ADD COLUMN transcript_path TEXT"),
+]
+
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply schema migrations not yet present.  Idempotent."""
@@ -257,10 +268,20 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         _apply_v3_schema_additions(conn)
         conn.execute("UPDATE schema_meta SET value='3' WHERE key='schema_version'")
         conn.commit()
+        current = 3
     else:
         # Always ensure v3 additions are present (idempotent) even for new DBs
         # that start at v3 and skip the migration block.
         _apply_v3_schema_additions(conn)
+        conn.commit()
+
+    if current < 4:  # noqa: PLR2004
+        _apply_v4_schema_additions(conn)
+        conn.execute("UPDATE schema_meta SET value='4' WHERE key='schema_version'")
+        conn.commit()
+    else:
+        # Always ensure v4 additions are present (idempotent) for new DBs at v4.
+        _apply_v4_schema_additions(conn)
         conn.commit()
 
 
@@ -305,6 +326,71 @@ def _apply_v3_schema_additions(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
     logger.info("schema migration v3: schema additions applied")
+
+
+def _apply_v4_schema_additions(conn: sqlite3.Connection) -> None:
+    """Apply v4 schema additions to sessions and create partial unique index.
+
+    Idempotent — wraps each ALTER in try/except since production DBs already have
+    the columns.  The partial unique index is created with IF NOT EXISTS.
+    Does NOT migrate data — that happens separately via migrate_offsets_v1.
+    """
+    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    for col, stmt in _V4_SESSION_ALTERS:
+        if col not in existing_cols:
+            try:
+                conn.execute(stmt)
+                logger.info("schema migration v4: added sessions.%s", col)
+            except sqlite3.OperationalError as exc:
+                # Column already exists in production DB — safe to ignore.
+                logger.debug("schema migration v4: skipped sessions.%s: %s", col, exc)
+
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_one_active_per_window"
+        " ON sessions(window_id) WHERE status='active' AND window_id IS NOT NULL"
+    )
+    logger.info("schema migration v4: schema additions applied")
+
+
+def dedupe_active_sessions(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Retire duplicate active rows for the same window_id, keeping the most recent.
+
+    For each window_id with more than one active row, keep the row with the
+    highest updated_at and set status='retired', window_id=NULL on the rest.
+
+    Returns a dict mapping kept session_id -> list of retired session_ids.
+    Idempotent — returns empty dict when no duplicates exist.
+    """
+    # Find window_ids with multiple active sessions
+    dupes = conn.execute(
+        "SELECT window_id FROM sessions"
+        " WHERE status='active' AND window_id IS NOT NULL"
+        " GROUP BY window_id HAVING COUNT(*) > 1"
+    ).fetchall()
+
+    result: dict[str, list[str]] = {}
+    for (window_id,) in dupes:
+        rows = conn.execute(
+            "SELECT session_id FROM sessions"
+            " WHERE status='active' AND window_id=?"
+            " ORDER BY updated_at DESC",
+            (window_id,),
+        ).fetchall()
+        if len(rows) < 2:
+            continue
+        keep_sid = rows[0]["session_id"]
+        retire_sids = [r["session_id"] for r in rows[1:]]
+        conn.execute(
+            "UPDATE sessions SET status='retired', window_id=NULL"
+            " WHERE session_id IN ({})".format(",".join("?" * len(retire_sids))),
+            retire_sids,
+        )
+        result[keep_sid] = retire_sids
+        logger.info(
+            "dedupe_active_sessions: kept %s, retired %s for window_id=%s",
+            keep_sid, retire_sids, window_id,
+        )
+    return result
 
 
 def _resolve_binding_from_markers(
