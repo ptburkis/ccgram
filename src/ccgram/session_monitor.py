@@ -693,21 +693,10 @@ class SessionMonitor:
 
             if provider.capabilities.supports_incremental_read:
                 initial_offset = file_size
-                # Check DB for a stored offset (set by recovery scripts
-                # or external tooling) — use it only if positive and lower
-                # than file_size. A stored 0 is the default empty value,
-                # NOT an instruction to replay the entire file.
-                try:
-                    with _store.connect() as conn:
-                        row = conn.execute(
-                            "SELECT transcript_offset FROM sessions "
-                            "WHERE session_id = ? AND transcript_offset IS NOT NULL",
-                            (session_id,),
-                        ).fetchone()
-                        if row and row[0] is not None and row[0] > 0 and row[0] < file_size:
-                            initial_offset = row[0]
-                except Exception:
-                    pass
+                # MonitorState.load() already populates tracked_sessions from
+                # user_prefs (canonical) at startup; if we reach here the session
+                # is genuinely new. No DB lookup needed -- and _store is undefined
+                # at module scope anyway (was a NameError, silently caught).
             else:
                 # Whole-file provider: count existing messages to skip them
                 _, initial_offset = await asyncio.to_thread(

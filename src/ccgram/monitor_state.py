@@ -110,6 +110,11 @@ class MonitorState:
                 self.events_offset,
             )
             return
+        from .config import config
+        if config.monitor_state_db_only:
+            # user_prefs is canonical; JSON fallback disabled.
+            logger.debug("monitor_state_db_only: skipping JSON fallback (DB was empty)")
+            return
         logger.warning(
             "falling back to legacy monitor_state.json — DB is empty or unavailable"
         )
@@ -133,22 +138,24 @@ class MonitorState:
 
     def save(self) -> None:
         """Save state to file atomically."""
+        from .config import config
         from .utils import atomic_write_json
 
-        data = {
-            "tracked_sessions": {
-                k: v.to_dict() for k, v in self.tracked_sessions.items()
-            },
-            "events_offset": self.events_offset,
-        }
+        if not config.monitor_state_db_only:
+            # Legacy JSON write (disabled by default; user_prefs is canonical).
+            data = {
+                "tracked_sessions": {
+                    k: v.to_dict() for k, v in self.tracked_sessions.items()
+                },
+                "events_offset": self.events_offset,
+            }
+            try:
+                atomic_write_json(self.state_file, data)
+            except OSError:
+                logger.exception("Failed to save state file")
+        self._dirty = False
 
-        try:
-            atomic_write_json(self.state_file, data)
-            self._dirty = False
-        except OSError:
-            logger.exception("Failed to save state file")
-
-        # Also persist to DB so restarts can reload without relying on JSON.
+        # Persist to DB (canonical store).
         from . import store
 
         try:

@@ -248,42 +248,25 @@ def _update_monitor_state_sync(
     new_sid: str,
     new_transcript: str,
 ) -> None:
-    """Update monitor_state.json: remove old tracked session, add new one at EOF.
+    """Write session rotation into user_prefs (canonical offset store).
 
-    Setting offset to the file size causes the monitor to skip the transcript
-    backlog and only forward new messages from this point forward — the same
-    behaviour as when the hook fires fresh on a SessionStart.
+    Removes the old session's prefs and seeds the new one at EOF so the
+    monitor skips the backlog — same behaviour as a fresh SessionStart hook.
     """
-    state_file = config.monitor_state_file
+    from . import store
     try:
-        data: dict[str, Any] = {}
-        if state_file.exists():
-            try:
-                data = json.loads(state_file.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        tracked = data.get("tracked_sessions", {})
-
-        # Remove old session.
-        tracked.pop(old_sid, None)
-
-        # Add new session at EOF so we don't replay the backlog.
-        try:
-            file_size = Path(new_transcript).stat().st_size
-        except OSError:
-            file_size = 0
-
-        tracked[new_sid] = {
-            "session_id": new_sid,
-            "file_path": new_transcript,
-            "last_byte_offset": file_size,
-        }
-        data["tracked_sessions"] = tracked
-        atomic_write_json(state_file, data)
+        file_size = Path(new_transcript).stat().st_size
     except OSError:
+        file_size = 0
+    try:
+        with store.connect() as conn:
+            store.delete_pref(conn, "monitor", "last_byte_offset", scope_id=old_sid)
+            store.delete_pref(conn, "monitor", "file_path", scope_id=old_sid)
+            store.set_pref(conn, "monitor", "last_byte_offset", file_size, scope_id=new_sid)
+            store.set_pref(conn, "monitor", "file_path", new_transcript, scope_id=new_sid)
+    except Exception:
         logger.debug(
-            "auto-heal: failed to update monitor_state for %s -> %s",
+            "auto-heal: failed to update monitor state in DB for %s -> %s",
             old_sid,
             new_sid,
             exc_info=True,

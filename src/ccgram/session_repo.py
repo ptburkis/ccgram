@@ -204,16 +204,6 @@ def retire_by_session_id(session_id: str, *, reason: str) -> bool:
     return False
 
 
-def update_offset(session_id: str, offset: int) -> None:
-    """Update ``transcript_offset`` for the given session."""
-    now = int(time.time())
-    with store.connect() as conn:
-        conn.execute(
-            "UPDATE sessions SET transcript_offset=?, updated_at=? WHERE session_id=?",
-            (offset, now, session_id),
-        )
-
-
 def update_transcript_path(session_id: str, path: str) -> None:
     """Update ``transcript_path`` for the given session."""
     now = int(time.time())
@@ -458,29 +448,9 @@ def hydrate_in_memory(
             count=len(new_states),
         )
 
-    # ------------------------------------------------------------------ #
-    # Rebuild monitor_state.tracked_sessions                              #
-    # ------------------------------------------------------------------ #
-    if monitor_state is not None:
-        from .monitor_state import TrackedSession
-
-        new_tracked: dict[str, "TrackedSession"] = {}
-        for r in sessions_rows:
-            tp = r["transcript_path"]
-            offset = r["transcript_offset"]
-            if not tp or not (offset and offset > 0):
-                continue
-            new_tracked[r["session_id"]] = TrackedSession(
-                session_id=r["session_id"],
-                file_path=tp,
-                last_byte_offset=offset,
-            )
-        monitor_state.tracked_sessions.clear()
-        monitor_state.tracked_sessions.update(new_tracked)
-        logger.info(
-            "hydrate_in_memory: rebuilt tracked_sessions",
-            count=len(new_tracked),
-        )
+    # tracked_sessions is owned by MonitorState.load() (user_prefs, canonical).
+    # Periodic rebuild from sessions.transcript_offset was the silent-rewind bug
+    # (transcript_offset is write-once at creation; never updated in practice).
 
     return {
         "sessions": sessions_count,
