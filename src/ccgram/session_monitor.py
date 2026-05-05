@@ -752,6 +752,20 @@ class SessionMonitor:
         new_entries = await self._read_new_lines(tracked, file_path, window_id)
         self._file_mtimes[session_id] = current_mtime
 
+        # /compact detection: Claude Code rewrites the JSONL on /compact, which
+        # can surface old conversation at our existing byte offset. The marker
+        # is `isCompactSummary: true` on a user-typed entry. When we see one in
+        # this read batch, drop everything we just read — those bytes are
+        # post-compact replay, not new content. Offset has already advanced to
+        # EOF via _read_new_lines, so future reads pick up only fresh writes.
+        if any(e.get("isCompactSummary") for e in new_entries):
+            logger.warning(
+                "Compact detected for session %s — dropping %d post-compact "
+                "entries; offset stays at EOF.",
+                session_id, len(new_entries),
+            )
+            new_entries = []
+
         # Freshness gate: drop entries older than max_message_age_seconds.
         # Defence-in-depth -- even if an offset bug surfaces stale bytes, they
         # never reach _message_queues.

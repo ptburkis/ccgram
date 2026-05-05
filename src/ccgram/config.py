@@ -210,7 +210,7 @@ class Config:
             "CCGRAM_MAX_BACKFILL_MESSAGES", 50
         )
         self.max_message_age_seconds: int = _parse_int_env(
-            "CCGRAM_MAX_MESSAGE_AGE_SECONDS", 3600
+            "CCGRAM_MAX_MESSAGE_AGE_SECONDS", 300
         )
         # When True: user_prefs is the sole offset store; JSON fallback disabled.
         self.monitor_state_db_only: bool = os.getenv(
