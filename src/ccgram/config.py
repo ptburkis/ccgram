@@ -205,6 +205,18 @@ class Config:
         )
         self._init_context_compaction()
 
+        # Replay-storm hardening
+        self.max_initial_backfill_messages: int = _parse_int_env(
+            "CCGRAM_MAX_BACKFILL_MESSAGES", 50
+        )
+        self.max_message_age_seconds: int = _parse_int_env(
+            "CCGRAM_MAX_MESSAGE_AGE_SECONDS", 3600
+        )
+        # When True: user_prefs is the sole offset store; JSON fallback disabled.
+        self.monitor_state_db_only: bool = os.getenv(
+            "CCGRAM_MONITOR_STATE_DB_ONLY", "1"
+        ).lower() not in ("0", "false", "no")
+
     def _init_context_compaction(self) -> None:
         self.context_compact_enabled: bool = os.getenv(
             "CCGRAM_CONTEXT_COMPACT_ENABLED", "1"

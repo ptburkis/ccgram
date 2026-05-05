@@ -98,6 +98,44 @@ _SYSTEM_WRAPPER_MARKERS = (
 )
 
 
+def _count_lines_in_range(file_path: "Path", start: int, end: int) -> int:
+    """Approximate line count between two byte offsets -- one line ~= one JSONL entry.
+    Returns 0 on any read error (caller treats that as "can't count, allow")."""
+    if start >= end:
+        return 0
+    try:
+        with open(file_path, "rb") as f:
+            f.seek(start)
+            data = f.read(end - start)
+    except OSError:
+        return 0
+    return data.count(b"\n")
+
+
+def _clamp_backfill_offset(
+    file_path: "Path",
+    proposed_offset: int,
+    file_size: int,
+    session_id: str,
+    cap: int,
+    reason: str,
+) -> int:
+    """If queueing from proposed_offset to EOF exceeds cap messages, return
+    file_size (skip-to-EOF) and warn. Otherwise return proposed_offset unchanged.
+    reason describes the call site for logs."""
+    if proposed_offset >= file_size or cap <= 0:
+        return proposed_offset
+    line_count = _count_lines_in_range(file_path, proposed_offset, file_size)
+    if line_count > cap:
+        logger.warning(
+            "Backfill cap hit for session %s (%s): %d messages between "
+            "offset %d and EOF %d > cap %d. Skipping to EOF; treat as bug.",
+            session_id, reason, line_count, proposed_offset, file_size, cap,
+        )
+        return file_size
+    return proposed_offset
+
+
 def _find_last_user_turn_offset(file_path: "Path") -> int:
     """Find the byte offset of the last REAL human user message in a Claude jsonl.
 
@@ -676,6 +714,10 @@ class SessionMonitor:
                     provider.read_transcript_file, str(file_path), 0
                 )
 
+            initial_offset = _clamp_backfill_offset(
+                file_path, initial_offset, file_size, session_id,
+                config.max_initial_backfill_messages, "first_time_tracking",
+            )
             tracked = TrackedSession(
                 session_id=session_id,
                 file_path=str(file_path),
@@ -1222,6 +1264,14 @@ class SessionMonitor:
                 continue
 
             initial_offset = _find_last_user_turn_offset(chosen)
+            try:
+                chosen_size = chosen.stat().st_size
+            except OSError:
+                chosen_size = initial_offset  # can't stat; clamp helper will no-op
+            initial_offset = _clamp_backfill_offset(
+                chosen, initial_offset, chosen_size, chosen_sid,
+                config.max_initial_backfill_messages, "reconcile_session_map",
+            )
 
             sm[f"{prefix}{wid}"] = {
                 "session_id": chosen_sid,
