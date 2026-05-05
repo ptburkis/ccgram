@@ -763,6 +763,39 @@ class SessionMonitor:
         new_entries = await self._read_new_lines(tracked, file_path, window_id)
         self._file_mtimes[session_id] = current_mtime
 
+        # Freshness gate: drop entries older than max_message_age_seconds.
+        # Defence-in-depth -- even if an offset bug surfaces stale bytes, they
+        # never reach _message_queues.
+        max_age = config.max_message_age_seconds
+        if max_age > 0 and new_entries:
+            import time as _time
+            from datetime import datetime, timezone
+            cutoff_ts = _time.time() - max_age
+            fresh: list[dict] = []
+            dropped = 0
+            for entry in new_entries:
+                ts_str = entry.get("timestamp", "")
+                if not ts_str:
+                    fresh.append(entry)
+                    continue
+                try:
+                    entry_ts = datetime.fromisoformat(
+                        ts_str.replace("Z", "+00:00")
+                    ).timestamp()
+                except (ValueError, TypeError):
+                    fresh.append(entry)
+                    continue
+                if entry_ts >= cutoff_ts:
+                    fresh.append(entry)
+                else:
+                    dropped += 1
+            if dropped:
+                logger.warning(
+                    "Freshness gate dropped %d stale entries for session %s "
+                    "(older than %ds); offset advanced past them.",
+                    dropped, session_id, max_age,
+                )
+            new_entries = fresh
 
         # Record transcript activity for status heuristic
         if new_entries:
